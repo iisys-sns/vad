@@ -1,0 +1,1463 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import math
+import os
+import random
+import requests
+import shutil
+import signal
+import subprocess
+import sys
+import unittest
+import yaml
+
+from collections import defaultdict
+from datetime import datetime
+from enum import Enum
+from pprint import pprint
+from prettytable import PrettyTable
+
+import inspect
+from io import StringIO
+from requests import Response
+from contextlib import redirect_stdout
+from functools import partial
+
+
+class DeviceType(Enum):
+    Ethernet = 1
+    Wifi = 2
+    Virtual = 3
+
+
+VERBOSE = False
+
+
+PREFIX = '/etc'
+NAME = 'mullvad'
+CONFIGURATION_HOP = f'{PREFIX}/wireguard/{NAME}%d.conf'
+DEVICE_NAME_HOP = f'{NAME}%d'
+NAMESPACE_HOP = f'{NAME}%d'
+DESCRIPTION = f'{PREFIX}/wireguard/{NAME}.description'
+CONFIGURATION = f'{PREFIX}/{NAME}/config.yaml'
+SERVERS = f'{PREFIX}/{NAME}/servers.json'
+NAMESPACE_ROOT = '1'
+NAMESPACE_PHYSICAL = 'physical'
+EUROPE = ["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu", "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se"]
+EUROPE_EXTENDED = ["is", "no", "li", "ch", "uk", "gb", "me", "mk", "al", "rs", "tr", "ba", "xk", "am", "az", "by", " md", "ge", "ua"]
+
+
+def create_args(**kwargs):
+    class Args:
+        pass
+    args = Args()
+    args.__dict__ = {**args.__dict__, **kwargs}
+    return args
+
+
+def become_root():
+    if os.geteuid() != 0:
+        os.execvp("sudo", ["sudo", "-E"] + sys.argv)
+
+
+def log_debug(*args, **kwargs):
+    if VERBOSE:
+        print(*args, **kwargs)
+
+
+def run_or_fail(args):
+    log_debug('+', subprocess.list2cmdline(args))
+    process = subprocess.run(args, capture_output=not VERBOSE)
+    if process.returncode != 0:
+        if not VERBOSE:
+            print('+', subprocess.list2cmdline(args))
+            print(str(process.stdout, 'utf8'), end='')
+            print(str(process.stderr, 'utf8'), end='')
+        sys.exit(process.returncode)
+
+
+def run(args, ignore_failure=False):
+    log_debug('+', subprocess.list2cmdline(args))
+    process = subprocess.run(args, capture_output=not VERBOSE)
+    if not ignore_failure and process.returncode != 0:
+        if not VERBOSE:
+            print('+', subprocess.list2cmdline(args))
+            print(str(process.stderr, 'utf8'))
+
+
+def device_move_to_physical(device):
+    type, dev, phy = device
+
+    log_debug("Move device %s into %s namespace" % (dev, NAMESPACE_PHYSICAL))
+
+    run_or_fail(["ip", "link", "set", dev, "down"])
+
+    if type == DeviceType.Ethernet:
+        run_or_fail(["ip", "link", "set", dev, "netns", NAMESPACE_PHYSICAL])
+    elif type == DeviceType.Wifi:
+        run_or_fail(["iw", "phy", phy, "set", "netns", "name", NAMESPACE_PHYSICAL])
+        run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "wpa_supplicant", "-B", "-c", "/etc/wpa_supplicant/wpa_supplicant.conf", "-i", dev])
+    else:
+        assert False
+
+    run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "dhcpcd", "-b", dev])
+
+
+def write_wireguard_config(device_index, device, server, port=51820):
+    wireguard_config = f"""
+        [Interface]
+        PrivateKey = {device['private_key']}
+
+        [Peer]
+        PublicKey = {server['pubkey']}
+        AllowedIPs = 0.0.0.0/0,::0/0
+        Endpoint = {server['ipv4_addr_in']}:{port}
+        """
+
+    wireguard_config = wireguard_config.strip()
+    wireguard_config = '\n'.join([line.strip() for line in wireguard_config.split('\n')])
+
+    configuration_filename = CONFIGURATION_HOP % device_index
+    log_debug("Create wireguard config: %s" % configuration_filename)
+    if os.path.exists(configuration_filename):
+        print("Configuration %s already exists!" % configuration_filename)
+        exit(1)
+    with open(configuration_filename, 'w') as c:
+        c.write(wireguard_config)
+
+    return configuration_filename, DEVICE_NAME_HOP % device_index, device['ipv4'], device['ipv6']
+
+
+def write_resolvconf(dns):
+    with open('/etc/resolv.conf', 'w') as resolvconf:
+        resolvconf.write(f"nameserver {dns}\n")
+
+
+def is_active():
+    any_exists = os.path.exists(CONFIGURATION_HOP % 0) or os.path.exists(DESCRIPTION)
+    all_exists = os.path.exists(CONFIGURATION_HOP % 0) and os.path.exists(DESCRIPTION)
+
+    if not any_exists == all_exists:
+        print('Warning: If the VPN is active or inactive two things should exist or not exist:')
+        print('- %s (%s) and' % (DESCRIPTION, os.path.exists(DESCRIPTION)))
+        print('- %s (%s)' % (CONFIGURATION_HOP % 0, os.path.exists(CONFIGURATION_HOP % 0)))
+
+    return (
+        os.path.exists(CONFIGURATION_HOP % 0) or
+        os.path.exists(DESCRIPTION)
+    )
+
+
+def get_dns_server_from_flags(flags):
+    bits = 0
+    for flag in flags:
+        if flag == 'a':
+            bits |= 1
+        elif flag == 't':
+            bits |= 1<<1
+        elif flag == 'm':
+            bits |= 1<<2
+        elif flag == 'p':
+            bits |= 1<<3
+        elif flag == 'g':
+            bits |= 1<<4
+        else:
+            print('Unkown flag "%s" for DNS server, we will ignore it!' % flag)
+
+    if bits == 0:
+        return '10.64.0.1'
+    else:
+        return '100.64.0.%d' % bits
+
+
+def filter_servers(type='wireguard', owned=None, active=None, country_city_hostname=None, diskless=None, servers=None):
+    if servers is None:
+        if os.path.exists(SERVERS):
+            with open(SERVERS) as f:
+                servers = json.load(f)
+        else:
+            print('%s does not exists, please use `vpn update`, `vpn up --update-server-list` or `vpn init`.' % SERVERS)
+            exit(1)
+
+    if type is not None:
+        servers = filter(lambda server: server['type'] == type, servers)
+
+    if owned is not None:
+        servers = filter(lambda server: server['owned'] == owned, servers)
+
+    if active is not None:
+        servers = filter(lambda server: server['active'] == active, servers)
+
+    if country_city_hostname is not None and not country_city_hostname == 'w':
+        if country_city_hostname == 'eu':
+            servers = filter(lambda server: server['country_code'] in EUROPE, servers)
+        elif country_city_hostname == 'ex':
+            servers = filter(lambda server: server['country_code'] in EUROPE + EUROPE_EXTENDED, servers)
+        elif len(country_city_hostname) == 2:
+            servers = filter(lambda server: server['country_code'] == country_city_hostname, servers)
+        elif len(country_city_hostname) == 3:
+            servers = filter(lambda server: server['city_code'] == country_city_hostname, servers)
+        elif len(country_city_hostname) >= 4:
+            servers = filter(lambda server: country_city_hostname in server['hostname'], servers)
+        else:
+            servers = []
+
+    if diskless is not None:
+        servers = filter(lambda server: server['stboot'] == diskless, servers)
+
+    servers = list(servers)
+    return servers
+
+
+def server_random_choice(servers, uniform_by_country=False):
+    if uniform_by_country:
+        countries = set()
+        for server in servers:
+            countries.add(server['country_code'])
+        countries = list(countries)
+        if len(countries) == 0:
+            return None
+        country = random.choice(countries)
+        servers = filter_servers(country_city_hostname=country, servers=servers)
+    if len(servers) == 0:
+        return None
+    return random.choice(servers)
+
+
+def request_account_number(passname, config):
+    if 'account_number' in config:
+        return config['account_number']
+
+    try:
+        uid = os.getenv('SUDO_UID', os.geteuid())
+        gid = os.getenv('SUDO_GID', os.getegid())
+        process = subprocess.run(['sudo', '-E', '-u', '#%s' % uid, '-g', '#%s' % gid, 'pass', passname], capture_output=True)
+        if process.returncode == 0:
+            lines = str(process.stdout, 'utf8')
+            lines = lines.split('\n')
+            if len(lines) >= 1:
+                account_number = lines[0]
+                if len(account_number) == 16:
+                    return account_number
+    except FileNotFoundError:
+        pass
+
+    while True:
+        account_number = input("Please enter your Mullvad account number (with or w/o spaces): ")
+        account_number = account_number.replace(" ", "")
+        if len(account_number) != 16 or not account_number.isdigit():
+            print("The account number must have 16 digits!")
+            continue
+        return account_number
+
+
+def request_login(account_number):
+    log_debug('request login...', end='')
+    try:
+        response = requests.get("https://api.mullvad.net/www/accounts/%s/" % account_number)
+    except Exception as e:
+        print("Error while sending request to login (%s)!" % (str(e)))
+        exit(1)
+    log_debug('%s' % response.status_code)
+    if response.status_code != 200:
+        print("Could not login into account (%d:%s)!" % (response.status_code, response.text))
+        exit(1)
+    try:
+        return response.json()
+    except Exception as e:
+        print("Could not parse account information (%s)!" % (str(e)))
+        exit(1)
+
+
+def request_add_key(login):
+    log_debug('request add key...', end='')
+    private_key = generate_private_key()
+    public_key = get_public_key(private_key)
+    try:
+        response = requests.post(
+            "https://api.mullvad.net/www/wg-pubkeys/add/",
+            headers=dict(
+                Authorization='Token %s' % login['auth_token']
+            ),
+            json=dict(
+                pubkey=public_key
+            )
+        )
+    except Exception as e:
+        print("Error while sending request to adding new public key (%s)!" % (str(e)))
+        exit(1)
+    log_debug('%s' % response.status_code)
+    if response.status_code != 201:
+        print("Could not add new public key to account (%d:%s)!" % (response.status_code, response.text))
+        exit(1)
+    try:
+        peer = json.loads(response.text)
+    except Exception as e:
+        print("Adding new public key: Could not parse response (%s:%s)!" % (response.text, str(e)))
+        exit(1)
+    if peer['key']['public'] != public_key:
+        print("Adding new public key: Public key in response should be equal to sended public key, but is not (%s (response) != %s (sended))!" % (peer['key']['public'], public_key))
+        exit(1)
+    return (private_key, public_key, peer)
+
+
+def request_revoke_key(login, public_key):
+    log_debug('request revoke key %s...' % public_key, end='')
+    try:
+        response = requests.post(
+            "https://api.mullvad.net/www/wg-pubkeys/revoke/",
+            headers=dict(
+                Authorization='Token %s' % login['auth_token']
+            ),
+            json=dict(
+                pubkey=public_key
+            )
+        )
+    except Exception as e:
+        print("Error while sending request to revoke public key (%s)!" % (str(e)))
+        exit(1)
+    log_debug('%s' % response.status_code)
+    return response.status_code == 204
+
+
+def request_logout(login):
+    log_debug('request logout...', end='')
+    try:
+        response = requests.post(
+            "https://api.mullvad.net/www/expire-auth-token/",
+            headers=dict(
+                Authorization='Token %s' % login['auth_token']
+            )
+        )
+    except Exception as e:
+        print("Error while sending request to logout (%s)!" % (str(e)))
+        exit(1)
+    log_debug('%s' % response.status_code)
+    return response.status_code in [200,204]
+
+
+def load_config():
+    if not os.path.exists(CONFIGURATION):
+        return False
+
+    with open(CONFIGURATION) as c:
+        config = yaml.safe_load(c)
+    for key in config:
+        if config[key] is None:
+            config[key] = ''
+    return config
+
+
+def save_config(config):
+    with open(CONFIGURATION, 'w') as c:
+        yaml.dump(config, c)
+    os.chmod(CONFIGURATION, 0o600)
+
+
+def init_command(args):
+    become_root()
+    update_command(None)
+
+    config = load_config()
+
+    if isinstance(config, dict):
+        if not 'devices' in config:
+            config['devices'] = []
+        if not args.add_device and len(config['devices']) > 0:
+            print('Already initialized with at least one device. If you want to add a new device, use `--add-device`.')
+            exit(1)
+    else:
+        config = dict(devices=[])
+
+    account_number = request_account_number(args.passname, config)
+    login = request_login(account_number)
+
+    try:
+        account = login['account']
+
+        if not account['active']:
+            print('Your account is expired (since %s)!' % account['expires'])
+            exit(1)
+
+        if not account['can_add_wg_peers']:
+            print('You can not add more devices, account is full!' )
+            exit(1)
+
+        private_key, public_key, peer = request_add_key(login)
+
+        config['devices'].append(dict(
+            private_key=private_key,
+            ipv4=peer['ipv4_address'],
+            ipv6=peer['ipv6_address'],
+        ))
+
+        if args.save_account_number:
+            config['account_number'] = account_number
+
+        save_config(config)
+
+        if len(config['devices']) == 1:
+            print('First device added (you can now use `vpn up`)')
+        else:
+            print('New device added')
+    finally:
+        request_logout(login)
+
+
+def delete_command(args):
+    become_root()
+
+    config = load_config()
+
+    if args.INDEX[0] == 'ALLIMSURE':
+        devices = config['devices']
+    else:
+        index = int(args.INDEX[0])
+        if index < len(config['devices']):
+            devices = [config['devices'][index]]
+        else:
+            print('Device with index %d does not exists!' % index)
+            return
+
+    for idx, device in enumerate(devices):
+        account_number = request_account_number(args.passname, config)
+        login = request_login(account_number)
+
+        try:
+            public_key = get_public_key(device['private_key'])
+            request_revoke_key(login, public_key)
+            config['devices'].remove(device)
+            save_config(config)
+            print("Deleted device %s (index %d)!" % (public_key, idx))
+        finally:
+            request_logout(login)
+
+
+def generate_private_key():
+    process = subprocess.run(['wg', 'genkey'], capture_output=True)
+    key = str(process.stdout, 'utf8').strip()
+    assert len(key) == 44
+    return key
+
+
+def get_public_key(private_key):
+    process = subprocess.Popen(['wg', 'pubkey'], stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+    process.stdin.write(bytes('%s\n' % private_key, 'utf8'))
+    process.stdin.close()
+    stdout = process.stdout.read()
+    process.stdout.close()
+    return str(stdout, 'utf8').strip()
+
+
+def get_this_peer(device, login):
+    if device is not None:
+        public_key = get_public_key(device['private_key'])
+        for wg_peer in login['account']['wg_peers']:
+            if wg_peer['key']['public'] == public_key:
+                return wg_peer
+    return None
+
+
+def get_city_ports(city_ports):
+    ports = []
+    for city_port in city_ports:
+        ports.append('%s-%s' % (city_port['city_code'], city_port['port']))
+    return ports
+
+
+def print_peer_table(peers, this_peers):
+    # NOTE: Unimportant columns:
+    # ports: []
+    # can_add_ports
+    # device_id
+    add_peer = lambda current, peer: table.add_row([
+            current,
+            '✓' if peer['app'] else '',
+            peer['created'],
+            peer['device_name'].title(),
+            peer['ipv4_address'],
+            peer['ipv6_address'],
+            peer['key']['public'],
+            '\n'.join(get_city_ports(peer['city_ports']))
+        ])
+
+    table = PrettyTable(['Index','By App', 'Created', 'Name', 'IPv4', 'IPv6', 'Public Key', 'Ports'])
+    table.align['Name'] = 'l'
+    table.align['IPv4'] = 'r'
+    table.align['IPv6'] = 'r'
+    for idx, peer in enumerate(this_peers):
+        if peer:
+            add_peer(str(idx), peer)
+    for peer in peers:
+        if peer in this_peers:
+            continue
+        add_peer('', peer)
+    print(table)
+
+
+def info_command(args):
+    become_root()
+
+    config = load_config()
+    account_number = request_account_number(args.passname, config)
+    login = request_login(account_number)
+
+    try:
+        peers = []
+        if config:
+            for device in config['devices']:
+                peer = get_this_peer(device, login)
+                peers.append(peer)
+
+        if args.raw:
+            for peer in peers:
+                print(yaml.dump(peer))
+            print(yaml.dump(login['account']))
+        else:
+            # NOTE: Unimportant columns:
+            # active
+            # can_add_ports
+            # can_add_wg_peers
+            # pretty_token
+            # subscription
+            # token
+            account = login['account']
+            expires = datetime.strptime(account['expires'], "%Y-%m-%dT%H:%M:%S+00:00")
+
+            print('Expires: %s' % expires)
+            print('Devices: %s/%s' % (len(account['wg_peers']), account['max_wg_peers']))
+            print('Ports: %s/%s' % (len(account['ports']), account['max_ports']))
+            for city_port in account['city_ports']:
+                print('- %s-%s' % (city_port['city_code'], city_port['port']))
+            print()
+            print_peer_table(account['wg_peers'], peers)
+    finally:
+        request_logout(login)
+
+
+def status_command(args):
+    become_root()
+
+    if is_active():
+        try:
+            with open(DESCRIPTION) as desc:
+                print(desc.read().strip())
+                print()
+            subprocess.run(["wg"])
+            for idx in range(1, 10):
+                namespace = NAME + str(idx)
+                if network_namespace_exists(namespace):
+                    print()
+                    subprocess.run(["ip", "netns", "exec", namespace, "wg"])
+        except Exception as e:
+            print("VPN seemed to be active but something went wrong (%s)" % str(e))
+        print()
+
+    try:
+        response = requests.get("https://am.i.mullvad.net/connected")
+        if response.status_code == 200:
+            print(response.text.strip())
+    except:
+        print("Not able to determine if connected to vpn")
+
+
+def describe_server(server):
+    return f"{server['city_name']}, {server['country_name']} ({server['hostname']}:{server['ipv4_addr_in']}:{server['multihop_port']})"
+
+
+def get_dns_from_args(args):
+    if len(args.dns) == 0:
+        return get_dns_server_from_flags('')
+    else:
+        return get_dns_server_from_flags(args.dns[0])
+
+
+def setup_mullvad_wireguard_device(namespace_new, namespace_link_to, device_name, config_filename, ipv4, ipv6, mtu):
+    update_physical_namespace = network_namespace_exists(NAMESPACE_PHYSICAL) and namespace_new == NAMESPACE_PHYSICAL
+
+    if update_physical_namespace:
+        prefix = 'Update'
+    else:
+        prefix = 'Create'
+
+    log_debug(f"{prefix} namespace %s and link to %s (device=%s, ipv4=%s, ipv6=%s, mtu=%s)" % (
+        namespace_new,
+        namespace_link_to,
+        device_name,
+        ipv4,
+        ipv6,
+        mtu
+    ))
+
+    if not update_physical_namespace:
+        run_or_fail(["ip", "netns", "add", namespace_new])
+        run_or_fail(["ip", "-n", namespace_new, "link", "set", "lo", "up"])
+        # NOTE: all pings for all user groups in physical namespace
+        run_or_fail(["ip", "netns", "exec", namespace_new, "sysctl", 'net.ipv4.ping_group_range=0 2147483647'])
+
+    run_or_fail(["ip", "-n", namespace_new, "link", "add", device_name, "type", "wireguard"])
+    run_or_fail(["ip", "-n", namespace_new, "link", "set", device_name, "netns", namespace_link_to])
+
+    if namespace_link_to == NAMESPACE_ROOT:
+        execute_namespace = []
+    else:
+        execute_namespace = ["ip", "netns", "exec", namespace_link_to]
+
+    run_or_fail(execute_namespace + ["wg", "setconf", device_name, config_filename])
+    run_or_fail(execute_namespace + ["ip", "addr", "add", ipv4, "dev", device_name])
+    run_or_fail(execute_namespace + ["ip", "addr", "add", ipv6, "dev", device_name])
+    run_or_fail(execute_namespace + ["ip", "link", "set", device_name, "up"])
+    run_or_fail(execute_namespace + ["ip", "link", "set", device_name, "mtu", str(mtu)])
+    run_or_fail(execute_namespace + ["ip", "route", "add", "default", "dev", device_name])
+
+
+def up_command(args):
+    become_root()
+
+    if args.update_server_list:
+        update_command(None)
+
+    config = load_config()
+    if not config or not isinstance(config, dict):
+        print('No configuration file found or not readable (use `vpn init` to create one)!')
+        exit(1)
+
+    if len(config['devices']) == 0:
+        print('No devices configured (use `vpn init` to create a device)!')
+        exit(1)
+
+    if len(args.COUNTRY_CITY_HOSTNAME) > 10:
+        print('Only 10 hops are supported, you specified %d (%s)!' % (len(args.COUNTRY_CITY_HOSTNAME), args.COUNTRY_CITY_HOSTNAME))
+        exit(1)
+
+    hops = len(args.COUNTRY_CITY_HOSTNAME)
+    if not args.without_multihop:
+        needed = math.ceil(hops / 2) - len(config['devices'])
+        if needed > 0:
+            print('You do not have enough devices to build a %d hop tunnel. With multihop you need at least %d more device(s) (use `vpn init --add-device`)' % (hops, needed))
+            exit(1)
+    else:
+        needed = hops - len(config['devices'])
+        if needed > 0:
+            print('You do not have enough devices to build a %d hop tunnel. Without multihop you need at least %d more device(s) (use `vpn init --add-device`)' % (hops, needed))
+            exit(1)
+
+    if len(args.COUNTRY_CITY_HOSTNAME) == 0:
+        args.COUNTRY_CITY_HOSTNAME = ['w']
+
+    servers = [
+        server_random_choice(
+            filter_servers(
+                active=True,
+                owned=args.owned_entry,
+                country_city_hostname=args.COUNTRY_CITY_HOSTNAME[0],
+                diskless=args.diskless_entry,
+            ),
+            uniform_by_country=args.uniform_by_country
+        )
+    ]
+    for country_city_hostname in args.COUNTRY_CITY_HOSTNAME[1:]:
+        for _ in range(10):
+            chosen_server = server_random_choice(
+                filter_servers(
+                    active=True,
+                    country_city_hostname=country_city_hostname
+                ),
+                uniform_by_country=args.uniform_by_country
+            )
+            if not chosen_server in servers:
+                servers.append(chosen_server)
+                break
+
+    if None in servers:
+        print('Filter criteria "%s" does not return any server!' %  args.COUNTRY_CITY_HOSTNAME[servers.index(None)])
+        exit(1)
+
+    if len(servers) != len(args.COUNTRY_CITY_HOSTNAME):
+        print("Could not chose unique servers for all hops! Please try again or use wider filter criteria.")
+        exit(1)
+
+    if len(servers) % 2 != 0:
+        i = iter(servers[1:])
+    else:
+        i = iter(servers)
+
+    description = []
+    if not args.without_multihop:
+        for left, right in reversed(list(zip(i, i))):
+            description.insert(0, describe_server(right))
+            description.insert(0, describe_server(left) + " [Multihop]")
+        if len(servers) % 2 != 0:
+            description.insert(0, describe_server(servers[0]) + " [Tunnel]")
+    else:
+        for server in reversed(servers):
+            description.insert(0, describe_server(server) + " [Tunnel]")
+
+    description[-1] += ' [Exit]'
+    description.append('with nameserver %s' % get_dns_from_args(args))
+    description = '\n- ' + '\n- '.join(description)
+
+    if args.dry_run:
+        print("Would configure: %s" % description)
+        exit(0)
+
+    was_already_active = is_active()
+
+    if was_already_active:
+        log_debug("Was already active, do a partial tear down.")
+        down_command(create_args(partial=True))
+
+    print("Configure: %s" % description)
+
+    with open(DESCRIPTION, 'w') as c:
+        c.write(f"{description}\n")
+
+    if len(servers) % 2 != 0:
+        i = iter(servers[1:])
+    else:
+        i = iter(servers)
+
+    configurations = []
+    namespaces = [NAMESPACE_ROOT]
+    devices = iter(enumerate(config['devices']))
+    if not args.without_multihop:
+        for left, right in reversed(list(zip(i, i))):
+            idx, device = next(devices)
+            namespaces.insert(1, NAME + str(idx))
+            configurations.append(write_wireguard_config(
+                device_index=idx,
+                device=device,
+                server=dict(
+                    pubkey = right['pubkey'],
+                    ipv4_addr_in = left['ipv4_addr_in'],
+                ),
+                port=int(right['multihop_port'])
+            ))
+        if len(servers) % 2 != 0:
+            idx, device = next(devices)
+            namespaces.insert(1, NAME + str(idx))
+            configurations.append(write_wireguard_config(
+                device_index=idx,
+                device=device,
+                server=servers[0]
+            ))
+    else:
+        for server in reversed(servers):
+            idx, device = next(devices)
+            namespaces.insert(1, NAME + str(idx))
+            configurations.append(write_wireguard_config(
+                device_index=idx,
+                device=device,
+                server=server
+            ))
+
+    namespaces[-1] = NAMESPACE_PHYSICAL
+
+    for idx, (configuration_filename, device_name, ipv4, ipv6) in enumerate(configurations):
+        namespace_new = namespaces[idx + 1]
+        namespace_link_to = namespaces[idx]
+        mtu = 1420 - (80 * (len(configurations) - idx - 1))
+        setup_mullvad_wireguard_device(
+            namespace_new,
+            namespace_link_to,
+            device_name,
+            configuration_filename,
+            ipv4,
+            ipv6,
+            mtu
+        )
+
+    if not was_already_active:
+        log_debug("Copy resolv.conf to physical namespace")
+        os.makedirs(f'/etc/netns/{NAMESPACE_PHYSICAL}', exist_ok=True)
+        shutil.copyfile("/etc/resolv.conf", f"/etc/netns/{NAMESPACE_PHYSICAL}/resolv.conf")
+        run(["killall", "-w", "wpa_supplicant", "dhcpcd"], ignore_failure=True)
+
+    for device in get_network_devices():
+        if device[0] != DeviceType.Virtual:
+            device_move_to_physical(device)
+
+    write_resolvconf(get_dns_from_args(args))
+
+    print("VPN is successfully up!")
+
+
+def network_namespace_exists(namespace):
+    process = subprocess.run(['ip', '-n', namespace, 'link'], capture_output=True)
+    return process.returncode == 0
+
+
+def remove_network_namespace(namespace_to_remove, namespace_linked_to, device_name, only_delete_linked_device=False):
+    if not only_delete_linked_device:
+        log_debug("remove network namespace %s which is linked to %s" % (namespace_to_remove, namespace_linked_to))
+    else:
+        log_debug("delete device %s from linked network namespace %s (birth place: %s)" % (device_name, namespace_linked_to, namespace_to_remove))
+
+    if namespace_linked_to == NAMESPACE_ROOT:
+        run(['ip', 'link', 'del', device_name])
+    else:
+        run(['ip', '-n', namespace_linked_to, 'link', 'del', device_name])
+
+    if not only_delete_linked_device:
+        process = subprocess.run(['ip', 'netns', 'pids', namespace_to_remove], capture_output=True)
+        if process.returncode == 0:
+            pids = str(process.stdout, 'utf8')
+            pids = pids.split('\n')
+            pids = pids[:-1]
+            if pids:
+                run(['ip', 'netns', 'exec', namespace_to_remove, 'kill'] + pids)
+
+        run(['ip', 'netns', 'del', namespace_to_remove])
+
+
+def remove_file_if_exists(filename):
+    if os.path.exists(filename):
+        log_debug('remove %s' % filename)
+        os.remove(filename)
+
+
+def down_command(args):
+    become_root()
+
+    remove_file_if_exists(DESCRIPTION)
+    remove_file_if_exists(CONFIGURATION_HOP % 0)
+
+    namespaces = [NAMESPACE_ROOT]
+    for idx in range(1, 10):
+        remove_file_if_exists(CONFIGURATION_HOP % idx)
+        if network_namespace_exists(NAMESPACE_HOP % idx):
+            namespaces.append(name)
+    namespaces.append(NAMESPACE_PHYSICAL)
+
+    for idx in reversed(range(len(namespaces))):
+        namespace = namespaces[idx]
+        if network_namespace_exists(namespace):
+            interface_name = namespaces[idx-1]
+
+            if interface_name == NAMESPACE_ROOT:
+                interface_name = 'mullvad0'
+
+            remove_network_namespace(
+                namespace_to_remove=namespaces[idx],
+                namespace_linked_to=namespaces[idx-1],
+                device_name=interface_name,
+                only_delete_linked_device=namespaces[idx] == NAMESPACE_PHYSICAL and args.partial
+            )
+
+    print("VPN is succefully down")
+
+
+def exec_command(args):
+    become_root()
+
+    uid = os.getenv('SUDO_UID', os.geteuid())
+    gid = os.getenv('SUDO_GID', os.getegid())
+    if sys.argv[2] == '--':
+        args = ["ip", "netns", "exec", NAMESPACE_PHYSICAL, "sudo", "-E", "-u", '#%s' % uid, "-g", '#%s' % gid, "--"] + sys.argv[3:]
+    else:
+        args = ["ip", "netns", "exec", NAMESPACE_PHYSICAL, "sudo", "-E", "-u", '#%s' % uid, "-g", '#%s' % gid, "--"] + sys.argv[2:]
+    os.execvp("ip", args)
+
+
+def list_command(args):
+    servers = filter_servers(
+        type=None if args.all else 'wireguard',
+        active=args.active,
+        owned=args.owned,
+        country_city_hostname=args.COUNTRY_CITY_HOSTNAME,
+        diskless=args.diskless
+    )
+
+    if args.group_by_country:
+        countries = defaultdict(int)
+        for server in servers:
+            key = (server['country_code'], server['country_name'])
+            countries[key] += 1
+
+        table = PrettyTable(['Count', 'Code', 'Country'])
+        table.align['Count'] = 'r'
+        table.align['Country'] = 'l'
+        for (country_code, country_name), count in sorted(countries.items(), key=lambda k: k[1]):
+            table.add_row([count, country_code, country_name])
+        print(table)
+    elif args.group_by_country_city:
+        country_cities = defaultdict(int)
+        for server in servers:
+            key = (
+                server['country_code'], server['country_name'],
+                server['city_code'], server['city_name']
+            )
+            country_cities[key] += 1
+
+        table = PrettyTable(['Count', '', 'Country', 'Code', 'City'])
+        table.align['Count'] = 'r'
+        table.align['Country'] = 'l'
+        table.align['City'] = 'l'
+        for (country_code, country_name, city_code, city_name), count in sorted(country_cities.items(), key=lambda k: k[1]):
+            table.add_row([count, country_code, country_name, city_code, city_name])
+        print(table)
+    else:
+        fields = ['Active', 'Owned', 'Diskless']
+
+        if args.all:
+            fields.append('Type')
+
+        fields.extend(['', 'Country', 'Code', 'City', 'Provider', 'Hostname'])
+
+        if args.show_column_ipv4:
+            fields.append('IPv4')
+        if args.show_column_ipv6:
+            fields.append('IPv6')
+
+        fields.append('Multihop Port')
+
+        if args.show_column_socks_proxy:
+            fields.append('Socks Proxy')
+
+        fields.append('Gbit/s')
+
+        if args.show_column_public_key:
+            fields.append('Public Key')
+
+        if args.show_column_status_messages:
+            fields.append('Messages')
+
+        table = PrettyTable(fields)
+        table.align['Country'] = 'l'
+        table.align['City'] = 'l'
+        table.align['Provider'] = 'l'
+        table.align['Hostname'] = 'l'
+        table.align['IPv4'] = 'r'
+        table.align['IPv6'] = 'r'
+        table.align['Gbit/s'] = 'r'
+        for server in servers:
+            values = [
+                '✓' if server['active'] else '',
+                '✓' if server['owned'] else '',
+                '✓' if server['stboot'] else '',
+            ]
+
+            if args.all:
+                values.append(server['type'])
+
+            values.extend([
+                server['country_code'],
+                server['country_name'],
+                server['city_code'],
+                server['city_name'],
+                server['provider'],
+                server['hostname'],
+            ])
+
+            if args.show_column_ipv4:
+                values.append(server['ipv4_addr_in'])
+            if args.show_column_ipv6:
+                values.append(server['ipv6_addr_in'])
+
+            values.append(server['multihop_port'] if 'multihop_port' in server else '')
+
+            if args.show_column_socks_proxy:
+                values.append('%s:%s' % (server['socks_name'], server['socks_port']) if 'socks_name' in server else '')
+
+            values.append(server['network_port_speed'])
+
+            if args.show_column_public_key:
+                values.append(server['pubkey'] if 'pubkey' in server else '')
+
+            if args.show_column_status_messages:
+                values.append('\n'.join(server['status_messages']))
+
+            table.add_row(values)
+        print(table)
+
+
+def update_command(args):
+    become_root()
+
+    os.makedirs('/etc/mullvad', exist_ok=True)
+
+    url_servers = "https://api.mullvad.net/www/relays/all"
+
+    try:
+        response = requests.get(url_servers)
+
+        if response.status_code == 200:
+            with open(SERVERS, 'w') as servers:
+                servers.write(response.text)
+            servers = filter_servers()
+            os.chmod(SERVERS, 0o644)
+            print('%s updated with %d wireguard servers' % (SERVERS, len(servers)))
+        else:
+            print('Can not download servers from %s, because of %s' % (url_servers, response.text))
+    except Exception as e:
+        print('Can not download servers from %s, because of %s' % (url_servers, str(e)))
+
+
+def get_network_devices():
+    dir = '/sys/class/net'
+    devices = []
+    for dev in os.listdir(dir):
+        path_dest = os.readlink(os.path.join(dir, dev))
+        if 'virtual' in path_dest:
+            devices.append((DeviceType.Virtual, dev, None))
+        elif 'devices' in path_dest:
+            path = os.path.join(dir, path_dest, "phy80211")
+            if os.path.exists(path):
+                devices.append((DeviceType.Wifi, dev, os.path.basename(os.readlink(path))))
+            else:
+                devices.append((DeviceType.Ethernet, dev, None))
+    return devices
+
+
+def dev_command(args):
+    become_root()
+
+    devices = get_network_devices()
+    for type, dev, phy in devices:
+        if phy:
+            print('%-10s %s (%s)' % (type.name, dev, phy))
+        else:
+            print('%-10s %s' % (type.name, dev))
+
+
+class TestCase(unittest.TestCase):
+    def save_main_module(self):
+        self.main_module = dict()
+        module = sys.modules[__name__]
+        for key, value in module.__dict__.items():
+            if not '__' in key:
+                self.main_module[key] = value
+        return module
+
+    def restore_main_module(self):
+        module = sys.modules[__name__]
+        for key, value in self.main_module.items():
+            module.__dict__[key] = value
+
+    def inject_get_response(self, code, content):
+        response = Response()
+        response.status_code = code
+        response._content = bytes(content, "utf8")
+        requests.get = lambda x: response
+
+    def throw_exception(self, arg):
+        raise Exception("Some exception")
+
+    def assertExit(self, func):
+        with self.assertRaises(SystemExit):
+            func()
+
+    def capture(self, func):
+        out = StringIO()
+        with redirect_stdout(out):
+            func()
+        return out.getvalue()
+
+
+class TestCommand(TestCase):
+    def load_config(self):
+        self.called[inspect.currentframe().f_code.co_name] = True
+        return self.config
+
+    def update_command(self, args):
+        self.called[inspect.currentframe().f_code.co_name] = True
+
+    def request_account_number(self, passname, config):
+        self.called[inspect.currentframe().f_code.co_name] = True
+        return self.request_account_number_result
+
+    def request_login(self, login):
+        self.called[inspect.currentframe().f_code.co_name] = True
+        return self.request_login_result
+
+    def request_logout(self, login):
+        self.called[inspect.currentframe().f_code.co_name] = True
+
+    def request_add_key(self, login):
+        self.called[inspect.currentframe().f_code.co_name] = True
+        return self.request_add_key_result
+
+    def save_config(self, config):
+        self.called[inspect.currentframe().f_code.co_name] = True
+        self.config = config
+
+    def setUp(self):
+        self.called = dict()
+        self.config = None
+        self.request_login_result = dict(account=dict(
+            active=True,
+            can_add_wg_peers=True,
+            expires='NEVER',
+        ))
+        self.request_add_key_result = (
+            'PRIVATE',
+            'PUBLIC',
+            dict(
+                ipv4_address='4',
+                ipv6_address='6'
+            )
+        )
+        self.request_account_number_result = '1234567890123456'
+
+        module = self.save_main_module()
+        module.become_root = lambda: None
+        module.load_config = self.load_config
+        module.save_config = self.save_config
+        module.update_command = self.update_command
+        module.request_account_number = self.request_account_number
+        module.request_login = self.request_login
+        module.request_add_key = self.request_add_key
+        module.request_logout = self.request_logout
+
+    def tearDown(self):
+        self.restore_main_module()
+
+
+class TestServerRandomChoice(TestCase):
+    def test(self):
+        import numpy as np
+        servers = filter_servers()
+        countries = defaultdict(int)
+
+        N = 1000
+        for _ in range(N):
+            server = server_random_choice(servers, uniform_by_country=True)
+            countries[server['country_code']] += 1
+
+        result = np.array(list(countries.values()))
+        expected = np.array([N/len(countries)] * len(countries.values()))
+
+        chi = np.sum((result - expected)**2 / expected)
+        chi = chi / len(countries.values())
+        assert chi < 2.0
+
+
+class TestGetDnsServerFromFlags(TestCase):
+    def testWrongFlag(self):
+        out = self.capture(partial(get_dns_server_from_flags, "x"))
+        self.assertIn("Unkown", out)
+
+    def test(self):
+        cases = [
+            ("10.64.0.1",   ""),
+            ("100.64.0.1",  "a"),
+            ("100.64.0.2",  "t"),
+            ("100.64.0.3",  "at"),
+            ("100.64.0.4",  "m"),
+            ("100.64.0.5",  "am"),
+            ("100.64.0.6",  "tm"),
+            ("100.64.0.7",  "atm"),
+            ("100.64.0.8",  "p"),
+            ("100.64.0.9",  "pa"),
+            ("100.64.0.10", "pt"),
+            ("100.64.0.11", "pat"),
+            ("100.64.0.12", "pm"),
+            ("100.64.0.13", "pam"),
+            ("100.64.0.14", "ptm"),
+            ("100.64.0.15", "patm"),
+            ("100.64.0.16", "g"),
+            ("100.64.0.17", "ga"),
+            ("100.64.0.18", "gt"),
+            ("100.64.0.19", "gat"),
+            ("100.64.0.20", "gm"),
+            ("100.64.0.21", "gam"),
+            ("100.64.0.22", "gmt"),
+            ("100.64.0.23", "gamt"),
+            ("100.64.0.24", "gp"),
+            ("100.64.0.25", "gap"),
+            ("100.64.0.26", "gpt"),
+            ("100.64.0.27", "gapt"),
+            ("100.64.0.28", "gpm"),
+            ("100.64.0.29", "gapm"),
+            ("100.64.0.30", "gpmt"),
+            ("100.64.0.31", "apgmt"),
+        ]
+
+        for dns, flags in cases:
+            self.assertEqual(dns, get_dns_server_from_flags(flags), "Used flags: %s" % flags)
+
+
+class TestRequestLogin(TestCase):
+    def call(self):
+        request_login('1234567890123456')
+
+    def tearDown(self):
+        from importlib import reload
+        reload(sys.modules["requests"])
+
+    def test404(self):
+        self.inject_get_response(404, 'ACCOUNT_NOT_FOUND')
+        out = self.capture(partial(self.assertExit, self.call))
+        self.assertTrue('ACCOUNT_NOT_FOUND', out)
+
+    def testException(self):
+        requests.get = self.throw_exception
+        out = self.capture(partial(self.assertExit, self.call))
+        self.assertIn('while sending', out)
+
+    def testJson(self):
+        self.inject_get_response(200, 'NOTJSON')
+        out = self.capture(partial(self.assertExit, self.call))
+        self.assertIn('not parse', out)
+
+    def test(self):
+        self.inject_get_response(200, '{}')
+        out = self.capture(self.call)
+        self.assertTrue(out == '')
+
+
+class TestInitCommand(TestCommand):
+    def testSaveAccountNumber(self):
+        out = self.capture(partial(init_command, create_args(
+            save_account_number=True,
+            passname='pasname'
+        )))
+        self.assertTrue(self.called['save_config'])
+        self.assertEqual(self.config['account_number'], self.request_account_number_result)
+
+    def testConfigUnchanged(self):
+        self.config = dict(
+            save_account_number=False,
+            account_number='TEST',
+        )
+        out = self.capture(partial(init_command, create_args(
+            add_device=False,
+            save_account_number=False,
+            passname='pasname'
+        )))
+        self.assertTrue(self.called['save_config'])
+        self.assertIn('account_number', self.config)
+
+    def testAddDevice(self):
+        self.config = dict(
+            devices=[dict()]
+        )
+        out = self.capture(partial(init_command, create_args(
+            save_account_number=False,
+            add_device=True,
+            passname='pasname'
+        )))
+        self.assertIn('added', out)
+        self.assertEqual(len(self.config['devices']), 2)
+
+    def testAlreadyInitialized(self):
+        self.config = dict(
+            devices=[dict()]
+        )
+        out = self.capture(partial(self.assertExit, partial(init_command, create_args(
+            save_account_number=False,
+            add_device=False,
+            passname='pasname'
+        ))))
+        self.assertIn('Already', out)
+
+    def testNotActive(self):
+        self.request_login_result['account']['active'] = False
+        out = self.capture(partial(self.assertExit, partial(init_command, create_args(
+            save_account_number=False,
+            add_device=True,
+            passname='pasname'
+        ))))
+        self.assertIn('NEVER', out)
+        self.assertTrue(self.called['request_logout'])
+
+    def testNoMoreDevices(self):
+        self.request_login_result['account']['can_add_wg_peers'] = False
+        out = self.capture(partial(self.assertExit, partial(init_command, create_args(
+            save_account_number=False,
+            add_device=True,
+            passname='pasname'
+        ))))
+        self.assertIn('full', out)
+        self.assertTrue(self.called['request_logout'])
+
+    def test(self):
+        out = self.capture(partial(init_command, create_args(
+            save_account_number=False,
+            add_device=True,
+            passname='pasname'
+        )))
+        self.assertIn('First device added', out)
+        self.assertTrue(self.called['update_command'])
+        self.assertTrue(self.called['request_login'])
+        self.assertTrue(self.called['request_logout'])
+        self.assertTrue(self.called['request_add_key'])
+        self.assertEqual(
+            self.config,
+            dict(devices=[dict(
+                private_key='PRIVATE',
+                ipv4='4',
+                ipv6='6',
+            )])
+        )
+
+
+def test_build_image(base_image, build, Dockerfile):
+    from tempfile import NamedTemporaryFile, TemporaryDirectory
+
+    tag = 'vpn-%s' % base_image
+
+    if build:
+        with TemporaryDirectory() as dir:
+            with open('%s/Dockerfile' % dir, 'w') as f:
+                f.write(Dockerfile.format(base_image=base_image))
+            subprocess.run(f"docker build -t {tag} {dir}", shell=True, check=True)
+    return tag
+
+
+def test_command(args):
+    if args.docker:
+        become_root()
+
+        images = []
+        images.append(test_build_image('archlinux', not args.docker_skip_build,
+            """
+            FROM {base_image}
+            RUN pacman -Syu --noconfirm python-requests python-yaml python-prettytable python-numpy
+            """
+        ))
+
+        for base_image in ['ubuntu', 'ubuntu:22.10', 'ubuntu:20.04', 'debian', 'debian:10']:
+            images.append(test_build_image(base_image, not args.docker_skip_build,
+                """
+                FROM {base_image}
+                RUN apt update && apt install -y -q python3-requests python3-yaml python3-prettytable python3-numpy
+                """
+            ))
+
+        path = sys.argv[0]
+        for image in images:
+            subprocess.run(f"docker run --rm -v /etc/mullvad/servers.json:/etc/mullvad/servers.json -v {path}:/bin/vpn {image} vpn test", shell=True, check=True)
+    else:
+        unittest.main(argv=sys.argv[1:])
+
+
+def vpn():
+    parser = argparse.ArgumentParser(
+        prog="vpn",
+        description="""
+Based on the script from <https://www.wireguard.com/netns> with a nicer interface for Mullvad and up to ten hops (but only up to three make sense).
+
+Assumptions:
+(1) Only works under Linux (requires network namespaces);
+(2) You have a Mullvad account;
+(3) You only want to use Wireguard servers (not OpenVPN);
+(4) You only want to use the IPv4 address of the server/endpoint;
+(5) You don't have a network interface with the name `mullvad0`;
+(6) You don't have wireguard configuration files with the names `/etc/wireguard/mullvad[0-9]`;
+(8) You don't have other network namespaces with the name `physical` or `mullvad[1-9]`;
+(8) A valid `resolv.conf` for the physical devices exists before first use (important for `vpn exec`);
+(9) Uses `wpa_supplicant` to configure wlan devices (if you use e.g. NetworkManager you need to duplicate the configuration); and;
+(10) You don't want to use Socks Proxies for Multihop.
+
+Dependencies:
+(1) `sudo`,
+(2) `kill`,
+(3) `wg`,
+(4) `ip`,
+(5) `iw` (for wifi),
+(6) `wpa_supplicant` (for wifi),
+(7) `dhcpcd`,
+(8) `sysctl`,
+(9) `python-yaml`,
+(10) `python-requests`,
+(11) `python-prettytable` (for info and list command),
+(12) `pass` (optionally).
+
+Untested/Unkown:
+There could be problems with other configured wireguard/vpn interfaces.""",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    parser.add_argument('-v', '--verbose', action='store_true', help='Output verbose/debug information.')
+
+    subparsers = parser.add_subparsers()
+    subparser_args = dict(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    init = subparsers.add_parser('init', help='Initalize Mullvad VPN. Adds devices to this computer. Without arguments, adds a new device to your account to this computer (will ask for your account number)', **subparser_args)
+    init.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
+    init.add_argument('-a', '--add-device', action='store_true', help='Creates an additonal device for your account to built tunnels over more hops. Every new devices enables one hop. In a multihop configuration (https://mullvad.net/de/help/multihop-wireguard) every devices enables two hops. Normally 5 devices are possible per account, this allows a maximum of ten hops.')
+    init.add_argument('-s', '--save-account-number', action='store_true', help='Saves the account number into the configuration file. Normally this number is your password and should be saved in a password manager, but for a easier setup you can also save it in the configuration file.')
+    init.set_defaults(func=init_command)
+
+    delete = subparsers.add_parser('delete', help='Delete added device(s) from this computer from your account.', **subparser_args)
+    delete.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
+    delete.add_argument('INDEX', nargs=1, metavar='INDEX', choices=['ALLIMSURE','0','1','2','3','4','5','6','7','8','9'], help='Delete specified device from this computer from your account (find index with `vpn info`) or delete all devices with "ALLIMSURE".')
+    delete.set_defaults(func=delete_command)
+
+    info = subparsers.add_parser('info', help='View account information and highlight devices added to this computer.', **subparser_args)
+    info.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
+    info.add_argument('-r', '--raw', action='store_true', help='Output raw account information.')
+    info.set_defaults(func=info_command)
+
+    update = subparsers.add_parser('update', help='Update or initialize server list.')
+    update.set_defaults(func=update_command)
+
+    up = subparsers.add_parser('up', aliases=['u'], help=f'Set up a vpn tunnel: move all physical network devices into the physical network namespace, configure one or more mullvad server and setup a wireguard device in the root namespace. All programs from non root users are forced to use the wireguard device in the root namespace.')
+    up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname if it contains this substring (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters. The order determines the data flow. More hops require more devices (see `vpn init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the european union then use "eu". If you only want to use hops from countries on the european continent then use "ex". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leak can occur, and build a new tunnel.')
+    up.add_argument('-a', '--update-server-list', action='store_true', help='Update server list.')
+    up.add_argument('-n', '--dry-run', action='store_true', help='Show only chosen hop(s) and nameserver.')
+    up.add_argument('-d', '--dns', nargs=1, help='Set a blocking dns server by flags (atmpg) or with no flags use the nonblocking dns server (10.64.0.1): a = Block adverdisments, t = Block tracking, m = Block malicious sites, p = Block adult content, g = Block gampling sites.', default='')
+    up.add_argument('-w', '--without-multihop', action='store_true', help='Normally pairs of hops are taken and configured as multihop beginning from the last hop. Every hop pair requires one device, with this option every hop requires one device.', default=False)
+    up.add_argument('-u', '--uniform-by-country', action='store_true', help='Randomly select a country and then randomly select a hop.')
+    up.add_argument('-o', '--owned-entry', action='store_true', help='Use a owned server by Mullvad for your entry hop.', default=None)
+    up.add_argument('-b', '--diskless-entry', action='store_true', help='Use a diskless server for your entry hop (stboot [BETA]).', default=None)
+    up.set_defaults(func=up_command)
+
+    down = subparsers.add_parser('down', aliases=['d'], help='Tear town the vpn configuration and restore the previous state.')
+    down.add_argument('-p', '--partial', action='store_true', help=f'Do not delete the physical namespace. Your physical network interfaces will remain in this namespace, which leaves with no network access at all. Useful if you manually configured your physical network namespace.', default=False)
+    down.set_defaults(func=down_command)
+
+    exec = subparsers.add_parser('exec', aliases=['e'], help='Execute command in the physical namespace. The command can use the physical network interfaces directly.')
+    exec.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to execute in the physical namespace with/without arguments.')
+    exec.set_defaults(func=exec_command)
+
+    status = subparsers.add_parser('status', aliases=['s'], help='Show vpn status information.', **subparser_args)
+    status.set_defaults(func=status_command)
+
+    dev = subparsers.add_parser('dev', help='List all network devices in the current namespace.')
+    dev.set_defaults(func=dev_command)
+
+    list = subparsers.add_parser('list', aliases=['l'], help='List, filter and group servers.', **subparser_args)
+    list.add_argument('COUNTRY_CITY_HOSTNAME', nargs='?', help='Select server by country code (e.g. de), city code (e.g. dus) or hostname if it contains this substring (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters.')
+    list.add_argument('--all', action='store_true', help='List also non wireguard servers and add "Type" column to table.')
+    list.add_argument('-c', '--group-by-country', action='store_true', help='Group and count by country.')
+    list.add_argument('-y', '--group-by-country-city', action='store_true', help='Group and count by country and city.')
+    list.add_argument('-4', '--show-column-ipv4', action='store_true', help='Shows ipv4 column (ignored by --group-by-*).')
+    list.add_argument('-6', '--show-column-ipv6', action='store_true', help='Shows ipv6 column (ignored by --group-by-*).')
+    list.add_argument('-p', '--show-column-public-key', action='store_true', help='Show public key column (ignored by --group-by-*).')
+    list.add_argument('-s', '--show-column-socks-proxy', action='store_true', help='Show socks proxy column (ignored by --group-by-*).')
+    list.add_argument('-m', '--show-column-status-messages', action='store_true', help='Show status messages column (ignored by --group-by-*).')
+    list.add_argument('-o', '--owned', dest='owned', action='store_true', help='Filter by owned servers.', default=None)
+    list.add_argument('-r', '--rented', dest='owned', action='store_false', help='Filter by rented servers.', default=None)
+    list.add_argument('-a', '--active', dest='active', action='store_true', help='Filter by active servers.', default=None)
+    list.add_argument('-i', '--inactive', dest='active', action='store_false', help='Filter by inactive servers.', default=None)
+    list.add_argument('-b', '--diskless', action='store_true', help='Filter by diskless boot servers (stboot [BETA]).', default=None)
+    list.set_defaults(func=list_command)
+
+    test = subparsers.add_parser('test', help='Run unittests.')
+    test.add_argument('-d', '--docker', action='store_true', help='Run the tests in different docker images (archlinux, ubuntu, debian).')
+    test.add_argument('-s', '--docker-skip-build', action='store_true', help='Skip docker build.')
+    test.add_argument('UNITTEST_CMD', nargs=argparse.REMAINDER, help='Command(s) for unittest.')
+    test.set_defaults(func=test_command)
+
+    args = parser.parse_args()
+
+    global VERBOSE
+    VERBOSE = args.verbose
+
+    if args.verbose:
+        if os.geteuid() == 0:
+            print(args)
+
+    if not 'func' in args:
+        parser.print_help()
+    else:
+        args.func(args)
+
+
+if __name__ == "__main__":
+    vpn()
