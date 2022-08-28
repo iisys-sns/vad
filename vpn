@@ -544,12 +544,12 @@ def status_command(args):
             with open(DESCRIPTION) as desc:
                 print(desc.read().strip())
                 print()
-            run(["wg"])
+            subprocess.run(["wg"])
             for idx in range(1, 10):
                 namespace = NAME + str(idx)
                 if network_namespace_exists(namespace):
                     print()
-                    run(["ip", "netns", "exec", namespace, "wg"])
+                    subprocess.run(["ip", "netns", "exec", namespace, "wg"])
         except Exception as e:
             print("VPN seemed to be active but something went wrong (%s)" % str(e))
         print()
@@ -702,6 +702,7 @@ def up_command(args):
         print("Would configure: %s" % description)
         exit(0)
 
+    physical_already_existed = network_namespace_exists(NAMESPACE_PHYSICAL)
     was_already_active = is_active()
 
     if was_already_active:
@@ -768,7 +769,7 @@ def up_command(args):
             mtu
         )
 
-    if not was_already_active:
+    if not physical_already_existed:
         log_debug("Copy resolv.conf to physical namespace")
         os.makedirs(f'/etc/netns/{NAMESPACE_PHYSICAL}', exist_ok=True)
         shutil.copyfile("/etc/resolv.conf", f"/etc/netns/{NAMESPACE_PHYSICAL}/resolv.conf")
