@@ -22,17 +22,16 @@ from requests import Response
 from contextlib import redirect_stdout
 from functools import partial
 
-# TODO: Add PostUp/PreUP and PostDown/PreDown commands (e.g. to override the sshd systemd unit to move and restart it in the physical namespace; and revert afterwards)
 # TODO: Make output nicer a bit of color
+# TODO: Add --exit-device to up command
+# TODO: Save options of the last up command in configuration file; and add option to skip saving to the configuration file
+# TODO: Add the possibility to use a specific configuration file;
 
 # TODO: Add `vpn service`, which autostart the vpn on system startup, creates the physical namespace and automatically moves new network devices into it.
 # TODO: Add commands to easily manage port forwarding: request and forward to local port (automatically add port to exit server if possible)
 #       $ vpn port 22
-# TODO: Add --exit-device to up command
 
 # TODO: Add device_id and device_name to configuration file
-# TODO: Save options of the last up command in configuration file; and add option to skip saving to the configuration file
-# TODO: Add the possibility to use a specific configuration file;
 
 # TODO: Change API from wwww to mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
 
@@ -79,23 +78,41 @@ def log_debug(*args, **kwargs):
 
 
 def run_or_fail(args):
-    log_debug('+', subprocess.list2cmdline(args))
     process = subprocess.run(args, capture_output=not VERBOSE)
     if process.returncode != 0:
         if not VERBOSE:
-            print('+', subprocess.list2cmdline(args))
+            print('-', subprocess.list2cmdline(args))
             print(str(process.stdout, 'utf8'), end='')
             print(str(process.stderr, 'utf8'), end='')
         sys.exit(process.returncode)
+    if process.returncode == 0:
+        log_debug('+', subprocess.list2cmdline(args))
+    elif not VERBOSE:
+        log_debug('-', subprocess.list2cmdline(args))
 
 
 def run(args, ignore_failure=False):
-    log_debug('+', subprocess.list2cmdline(args))
     process = subprocess.run(args, capture_output=not VERBOSE)
     if not ignore_failure and process.returncode != 0:
         if not VERBOSE:
-            print('+', subprocess.list2cmdline(args))
+            print('-', subprocess.list2cmdline(args))
             print(str(process.stderr, 'utf8'))
+    if process.returncode == 0:
+        log_debug('+', subprocess.list2cmdline(args))
+    elif not VERBOSE:
+        log_debug('-', subprocess.list2cmdline(args))
+
+
+def execute_commands(config, section):
+    log_debug("Try to execute commands from the '%s' section" % section)
+    if not 'default' in config:
+        return
+    if not section in config['default']:
+        return
+    if not isinstance(config['default'][section], list):
+        return
+    for command in config['default'][section]:
+        run(['bash', '-c', command.replace('\\n', '\n')])
 
 
 def device_move_to_physical(device):
@@ -646,6 +663,8 @@ def up_command(args):
         print('No devices configured (use `vpn init` to create a device)!')
         exit(1)
 
+    execute_commands(config, 'pre_up')
+
     if len(args.COUNTRY_CITY_HOSTNAME) > 10:
         print('Only 10 hops are supported, you specified %d (%s)!' % (len(args.COUNTRY_CITY_HOSTNAME), args.COUNTRY_CITY_HOSTNAME))
         exit(1)
@@ -797,6 +816,8 @@ def up_command(args):
 
     update_resolvconf(get_dns_from_args(args))
 
+    execute_commands(config, 'post_up')
+
     print("VPN is successfully up!")
 
 
@@ -837,6 +858,11 @@ def remove_file_if_exists(filename):
 def down_command(args):
     become_root()
 
+    config = load_config()
+
+    if config and not args.partial:
+        execute_commands(config, 'pre_down')
+
     remove_file_if_exists(DESCRIPTION)
     remove_file_if_exists(CONFIGURATION_HOP % 0)
 
@@ -861,6 +887,9 @@ def down_command(args):
                 device_name=interface_name,
                 only_delete_linked_device=namespaces[idx] == NAMESPACE_PHYSICAL and args.partial
             )
+
+    if config and not args.partial:
+        execute_commands(config, 'post_down')
 
     print("VPN is succefully down")
 
