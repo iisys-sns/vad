@@ -23,8 +23,7 @@ from contextlib import redirect_stdout
 from functools import partial
 
 # TODO: Add PostUp/PreUP and PostDown/PreDown commands (e.g. to override the sshd systemd unit to move and restart it in the physical namespace; and revert afterwards)
-# TODO: Add nameserver through `resolveconf` command: echo 'nameserver 100.64.0.31' | sudo resolvconf -a mullvad0; resolvconf -l
-#       Do not copy resolv.conf to physical namespace
+# TODO: Make output nicer a bit of color
 
 # TODO: Add `vpn service`, which autostart the vpn on system startup, creates the physical namespace and automatically moves new network devices into it.
 # TODO: Add commands to easily manage port forwarding: request and forward to local port (automatically add port to exit server if possible)
@@ -142,9 +141,13 @@ def write_wireguard_config(device_index, device, server, port=51820):
     return configuration_filename, DEVICE_NAME_HOP % device_index, device['ipv4'], device['ipv6']
 
 
-def write_resolvconf(dns):
-    with open('/etc/resolv.conf', 'w') as resolvconf:
-        resolvconf.write(f"nameserver {dns}\n")
+def update_resolvconf(dns):
+    log_debug('Run resolvconf to add nameserver %s' % dns)
+    with subprocess.Popen(['resolvconf', '-a', '%s.vpn' % DEVICE_NAME_HOP % 0], stdin=subprocess.PIPE) as process:
+        process.stdin.write(bytes('nameserver %s\n' % dns, 'utf8'))
+        process.stdin.close()
+    if process.returncode != 0:
+        print('Error while running resolvconf, could not add nameserver %s.' % dns)
 
 
 def is_active():
@@ -786,16 +789,13 @@ def up_command(args):
         )
 
     if not physical_already_existed:
-        log_debug("Copy resolv.conf to physical namespace")
-        os.makedirs(f'/etc/netns/{NAMESPACE_PHYSICAL}', exist_ok=True)
-        shutil.copyfile("/etc/resolv.conf", f"/etc/netns/{NAMESPACE_PHYSICAL}/resolv.conf")
         run(["killall", "-w", "wpa_supplicant", "dhcpcd"], ignore_failure=True)
 
     for device in get_network_devices():
         if device[0] != DeviceType.Virtual:
             device_move_to_physical(device)
 
-    write_resolvconf(get_dns_from_args(args))
+    update_resolvconf(get_dns_from_args(args))
 
     print("VPN is successfully up!")
 
@@ -1389,7 +1389,7 @@ Assumptions:
 (5) You don't have a network interface with the name `mullvad0`;
 (6) You don't have wireguard configuration files with the names `/etc/wireguard/mullvad[0-9]`;
 (8) You don't have other network namespaces with the name `physical` or `mullvad[1-9]`;
-(8) A valid `resolv.conf` for the physical devices exists before first use (important for `vpn exec`);
+(8) The `resolv.conf` is shared between root and physical namespace.
 (9) Uses `wpa_supplicant` to configure wlan devices (if you use e.g. NetworkManager you need to duplicate the configuration); and;
 (10) You don't want to use Socks Proxies for Multihop.
 
@@ -1405,7 +1405,8 @@ Dependencies:
 (9) `python-yaml`,
 (10) `python-requests`,
 (11) `python-prettytable` (for info and list command),
-(12) `pass` (optionally).
+(12) `resolvconf`,
+(13) `pass` (optionally).
 
 Untested/Unkown:
 There could be problems with other configured wireguard/vpn interfaces.
