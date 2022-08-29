@@ -24,7 +24,12 @@ from requests import Response
 from contextlib import redirect_stdout
 from functools import partial
 
+# TODO: Make option -s from init the default; change it to --dont-save-in-configuration.
+# TODO: Add PostUp/PreUP and PostDown/PreDown commands (e.g. to override the sshd systemd unit to move and restart it in the physical namespace; and revert afterwards)
+# TODO: Add nameserver through `resolveconf` command: echo 'nameserver 100.64.0.31' | sudo resolvconf -a mullvad0; resolvconf -l
+#       Do not copy resolv.conf to physical namespace
 
+# TODO: Add `vpn service`, which autostart the vpn on system startup, creates the physical namespace and automatically moves new network devices into it.
 # TODO: Add commands to easily manage port forwarding: request and forward to local port (automatically add port to exit server if possible)
 #       $ vpn port 22
 # TODO: Add --exit-device to up command
@@ -32,11 +37,8 @@ from functools import partial
 # TODO: Add device_id and device_name to configuration file
 # TODO: Save options of the last up command in configuration file; and add option to skip saving to the configuration file
 # TODO: Add the possibility to use a specific configuration file;
-# TODO: Make option -s from init the default; change it to --dont-save-in-configuration.
 
-# TODO: Add PostUp/PreUP and PostDown/PreDown commands (e.g. to override the sshd systemd unit to move and restart it in the physical namespace; and revert afterwards)
 # TODO: Change API from wwww to mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
-# TODO: Add `vpn service`, which autostart the vpn on system startup, creates the physical namespace and automatically moves new network devices into it.
 
 
 class DeviceType(Enum):
