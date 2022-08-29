@@ -6,7 +6,6 @@ import os
 import random
 import requests
 import shutil
-import signal
 import subprocess
 import sys
 import unittest
@@ -15,7 +14,6 @@ import yaml
 from collections import defaultdict
 from datetime import datetime
 from enum import Enum
-from pprint import pprint
 from prettytable import PrettyTable
 
 import inspect
@@ -315,7 +313,7 @@ def request_add_key(login):
     if peer['key']['public'] != public_key:
         print("Adding new public key: Public key in response should be equal to sended public key, but is not (%s (response) != %s (sended))!" % (peer['key']['public'], public_key))
         exit(1)
-    return (private_key, public_key, peer)
+    return (private_key, peer)
 
 
 def request_revoke_key(login, public_key):
@@ -400,7 +398,7 @@ def init_command(args):
             print('You can not add more devices, account is full!' )
             exit(1)
 
-        private_key, public_key, peer = request_add_key(login)
+        private_key, peer = request_add_key(login)
 
         config['devices'].append(dict(
             private_key=private_key,
@@ -1333,7 +1331,7 @@ class TestInitCommand(TestCommand):
 
 
 def test_build_image(base_image, build, Dockerfile):
-    from tempfile import NamedTemporaryFile, TemporaryDirectory
+    from tempfile import TemporaryDirectory
 
     tag = 'vpn-%s' % base_image
 
@@ -1508,12 +1506,12 @@ $ vpn delete ALLIMSURE
     up.add_argument('-b', '--diskless-entry', action='store_true', help='Use a diskless server for your entry hop (stboot [BETA]).', default=None)
     up.set_defaults(func=up_command)
 
-    down = subparsers.add_parser('down', aliases=['d'], help='Tear town the vpn configuration and restore the previous state.')
+    down = subparsers.add_parser('down', aliases=['d'], help='Tear down the vpn configuration and restore the previous state.')
     down.add_argument('-p', '--partial', action='store_true', help=f'Do not delete the physical namespace. Your physical network interfaces will remain in this namespace, which leaves with no network access at all. Useful if you manually configured your physical network namespace.', default=False)
     down.set_defaults(func=down_command)
 
     exec = subparsers.add_parser('exec', aliases=['e'], help='Execute command in the physical namespace. The command can use the physical network interfaces directly.')
-    exec.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to execute in the physical namespace with/without arguments.')
+    exec.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to execute in the physical namespace with or without arguments.')
     exec.set_defaults(func=exec_command)
 
     status = subparsers.add_parser('status', aliases=['s'], help='Show vpn status information.', **subparser_args)
