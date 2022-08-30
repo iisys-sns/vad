@@ -664,7 +664,7 @@ def setup_mullvad_wireguard_device(namespace_new, namespace_link_to, device_name
     if not update_physical_namespace:
         run_or_fail(["ip", "netns", "add", namespace_new])
         run_or_fail(["ip", "-n", namespace_new, "link", "set", "lo", "up"])
-        # NOTE: all pings for all user groups in physical namespace
+        # NOTE: allow "ping" command for all user groups in the physical namespace
         run_or_fail(["ip", "netns", "exec", namespace_new, "sysctl", 'net.ipv4.ping_group_range=0 2147483647'])
 
     run_or_fail(["ip", "-n", namespace_new, "link", "add", device_name, "type", "wireguard"])
@@ -851,7 +851,6 @@ def up_command(args, is_default):
 
     if not physical_already_existed:
         run(["killall", "-w", "wpa_supplicant", "dhcpcd"], ignore_failure=True)
-        execute_commands(config, 'post_up')
 
     for device in get_network_devices():
         if device[0] != DeviceType.Virtual:
@@ -869,14 +868,19 @@ def up_command(args, is_default):
         del args_to_save['func']
         del args_to_save['verbose']
         del args_to_save['dry_run']
+        del args_to_save['dont_save']
         config['default']['up_command'] = args_to_save
 
         save_config(config)
+
+    if not physical_already_existed:
+        execute_commands(config, 'post_up')
 
     print("VPN is successfully up!")
 
 
 def network_namespace_exists(namespace):
+    # TODO: Is this replacable by os.path.exists('/var/run/netns/%s' % namespace)?
     process = subprocess.run(['ip', '-n', namespace, 'link'], capture_output=True)
     return process.returncode == 0
 
@@ -926,6 +930,7 @@ def down_command(args, is_default):
 
     if config and not args.partial:
         execute_commands(config, 'pre_down')
+        config = load_config()
 
     remove_file_if_exists(DESCRIPTION)
     remove_file_if_exists(CONFIGURATION_HOP % 0)
@@ -1142,7 +1147,8 @@ class TestDependencies(unittest.TestCase):
             "iw",
             "wpa_supplicant",
             "dhcpcd",
-            "sysctl"
+            "sysctl",
+            "resolvconf",
             # pass
         ]
 
@@ -1548,18 +1554,21 @@ Rotate Wireguard keys for your first configured device:
 $ vpn down
 $ vpn delete 0
 $ vpn init
+($ vpn rotate)
 
 Rotate Wireguard keys for your first configured device while the vpn is active:
 $ vpn up         # Remembers the configuration from `vpn up de pl se` and builds a 3 hop tunnel
 $ vpn update     # Just in case
 $ vpn delete 0
 $ vpn init
+($ vpn rotate)
 $ vpn up
 $ vpn status
 
 Reset:
 $ vpn down
 $ vpn delete ALLIMSURE
+($ vpn reset)
 """,
 
         formatter_class=argparse.RawDescriptionHelpFormatter
