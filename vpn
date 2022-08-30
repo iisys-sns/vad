@@ -963,10 +963,9 @@ def exec_command(args, is_default):
 
     uid = os.getenv('SUDO_UID', os.geteuid())
     gid = os.getenv('SUDO_GID', os.getegid())
-    if sys.argv[2] == '--':
-        args = ["ip", "netns", "exec", NAMESPACE_PHYSICAL, "sudo", "-E", "-u", '#%s' % uid, "-g", '#%s' % gid, "--"] + sys.argv[3:]
-    else:
-        args = ["ip", "netns", "exec", NAMESPACE_PHYSICAL, "sudo", "-E", "-u", '#%s' % uid, "-g", '#%s' % gid, "--"] + sys.argv[2:]
+    args = ["ip", "netns", "exec", NAMESPACE_PHYSICAL, "sudo", "-E", "-u", '#%s' % uid, "-g", '#%s' % gid, "--"] + args.CMD
+    if VERBOSE:
+        print(subprocess.list2cmdline(args))
     os.execvp("ip", args)
 
 
