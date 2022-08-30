@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import argparse
 import json
 import math
@@ -18,10 +19,13 @@ from enum import Enum
 from prettytable import PrettyTable
 
 import inspect
+from ctypes import cdll
 from io import StringIO
 from requests import Response
 from contextlib import redirect_stdout
 from functools import partial
+
+setns = cdll.LoadLibrary('libc.so.6').setns
 
 # TODO: Make verbose output nicer, a little bit of color can not hurt
 # TODO: Add --exit-device to up command
@@ -34,13 +38,7 @@ from functools import partial
 # TODO: Add device_id and device_name to configuration file
 # TODO: Change API from wwww to mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
 # TODO: Update configuration for PostUp/PreUp/PostDown/PostUp
-
-
-
-class DeviceType(Enum):
-    Ethernet = 1
-    Wifi = 2
-    Virtual = 3
+# TODO: Add `vpn reset` command
 
 
 VERBOSE = False
@@ -60,6 +58,42 @@ EUROPE = ["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr"
 EUROPE_EXTENDED = ["is", "no", "li", "ch", "uk", "gb", "me", "mk", "al", "rs", "tr", "ba", "xk", "am", "az", "by", " md", "ge", "ua"]
 
 
+class DeviceType(Enum):
+    Ethernet = 1
+    Wifi = 2
+    Virtual = 3
+
+
+def get_ns_path(nspath=None, nsname=None, nspid=None):
+    if nsname:
+        nspath = '/var/run/netns/%s' % nsname
+    elif nspid:
+        nspath = '/proc/%d/ns/net' % nspid
+
+    return nspath
+
+
+# Source: <https://stackoverflow.com/questions/28846059/can-i-open-sockets-in-multiple-network-namespaces-from-my-python-code>
+class NetworkNamespace(object):
+    def __init__(self, nsname=None, nspath=None, nspid=None):
+        self.mypath = get_ns_path(nspid=os.getpid())
+        self.targetpath = get_ns_path(nspath,
+                                  nsname=nsname,
+                                  nspid=nspid)
+
+    def __enter__(self):
+        if self.targetpath is not None:
+            self.myns = open(self.mypath)
+            with open(self.targetpath) as fd:
+                setns(fd.fileno(), 0)
+
+    def __exit__(self, *args):
+        if self.targetpath is not None:
+            setns(self.myns.fileno(), 0)
+            self.myns.close()
+
+
+# TODO: remove and replace with Namespace
 def create_args(**kwargs):
     class Args:
         pass
@@ -867,6 +901,15 @@ def remove_network_namespace(namespace_to_remove, namespace_linked_to, device_na
             if pids:
                 run(['ip', 'netns', 'exec', namespace_to_remove, 'kill'] + pids)
 
+        if namespace_to_remove == NAMESPACE_PHYSICAL:
+            # get_network_devices()
+            # ip -n physical link set eth0 down
+            # ip -n physical link set eth0 netns 1
+
+            # ip -n physical link set wlan0 down
+            # ip netns exec physical iw phy phy0 set netns 1
+            pass
+
         run(['ip', 'netns', 'del', namespace_to_remove])
 
 
@@ -1064,6 +1107,7 @@ def update_command(args, is_default):
 def get_network_devices():
     dir = '/sys/class/net'
     devices = []
+    # with NetworkNamespace(nsname=namespace):
     for dev in os.listdir(dir):
         path_dest = os.readlink(os.path.join(dir, dev))
         if 'virtual' in path_dest:
@@ -1472,18 +1516,18 @@ $ apt install python3-requests python3-yaml python3-prettytable python3-numpy su
 Examples:
 
 First use:
-$ vpn init -s    # Will ask for your account number.
+$ vpn init       # Will ask for your account number and saves it
 $ vpn up
 
 Show status information:
 $ vpn status
 
 The up command can be called multiple times:
-$ vpn up de      # Build tunnel to a server in Germany
+$ vpn up de      # Build one hop tunnel to a server in Germany
 $ vpn status
-$ vpn up pl      # Update tunnel to a server in Poland
+$ vpn up pl      # Update one hop tunnel to a server in Poland
 $ vpn status
-$ vpn up se      # Update tunnel to a server in Sweden
+$ vpn up se      # Update one hop tunnel to a server in Sweden
 $ vpn status
 
 Build a 2 hop (multihop) tunnel:
@@ -1507,7 +1551,7 @@ $ vpn delete 0
 $ vpn init
 
 Rotate Wireguard keys for your first configured device while the vpn is active:
-$ vpn up
+$ vpn up         # Remembers the configuration from `vpn up de pl se` and builds a 3 hop tunnel
 $ vpn update     # Just in case
 $ vpn delete 0
 $ vpn init
