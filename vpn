@@ -934,7 +934,7 @@ def down_command(args, is_default):
     for idx in range(1, 10):
         remove_file_if_exists(CONFIGURATION_HOP % idx)
         if network_namespace_exists(NAMESPACE_HOP % idx):
-            namespaces.append(name)
+            namespaces.append(NAMESPACE_HOP % idx)
     namespaces.append(NAMESPACE_PHYSICAL)
 
     for idx in reversed(range(len(namespaces))):
