@@ -1510,6 +1510,16 @@ Dependencies:
 Untested/Unkown:
 There could be problems with other configured wireguard/vpn interfaces.
 
+Related:
+* https://github.com/mullvad/mullvadvpn-app
+* https://github.com/chutz/mullvad-netns
+* https://github.com/DanielG/dxld-mullvad
+* https://github.com/jamesmcm/vopono
+* https://github.com/chrisbouchard/namespaced-wireguard-vpn
+* https://github.com/nurupo/pia-wg-netns-vpn
+* https://github.com/amonakov/vpn-netns
+* https://github.com/pekman/openvpn-netns
+
 Install Dependencies:
 
 Arch Linux based:
