@@ -11,6 +11,7 @@ import sys
 import unittest
 import yaml
 
+from argparse import Namespace
 from collections import defaultdict
 from datetime import datetime
 from enum import Enum
@@ -22,18 +23,18 @@ from requests import Response
 from contextlib import redirect_stdout
 from functools import partial
 
-# TODO: Make output nicer a bit of color
+# TODO: Make verbose output nicer, a little bit of color can not hurt
 # TODO: Add --exit-device to up command
-# TODO: Save options of the last up command in configuration file; and add option to skip saving to the configuration file
-# TODO: Add the possibility to use a specific configuration file;
+# TODO: Add the possibility to use a specific configuration name besides "default";
 
 # TODO: Add `vpn service`, which autostart the vpn on system startup, creates the physical namespace and automatically moves new network devices into it.
 # TODO: Add commands to easily manage port forwarding: request and forward to local port (automatically add port to exit server if possible)
 #       $ vpn port 22
 
 # TODO: Add device_id and device_name to configuration file
-
 # TODO: Change API from wwww to mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
+# TODO: Update configuration for PostUp/PreUp/PostDown/PostUp
+
 
 
 class DeviceType(Enum):
@@ -388,9 +389,9 @@ def save_config(config):
     os.chmod(CONFIGURATION, 0o600)
 
 
-def init_command(args):
+def init_command(args, is_default):
     become_root()
-    update_command(None)
+    update_command(None, True)
 
     config = load_config()
 
@@ -441,7 +442,7 @@ def init_command(args):
         request_logout(login)
 
 
-def delete_command(args):
+def delete_command(args, is_default):
     become_root()
 
     config = load_config()
@@ -532,7 +533,7 @@ def print_peer_table(peers, this_peers):
     print(table)
 
 
-def info_command(args):
+def info_command(args, is_default):
     become_root()
 
     config = load_config()
@@ -572,7 +573,7 @@ def info_command(args):
         request_logout(login)
 
 
-def status_command(args):
+def status_command(args, is_default):
     become_root()
 
     if is_active():
@@ -648,22 +649,25 @@ def setup_mullvad_wireguard_device(namespace_new, namespace_link_to, device_name
     run_or_fail(execute_namespace + ["ip", "route", "add", "default", "dev", device_name])
 
 
-def up_command(args):
+def up_command(args, is_default):
     become_root()
-
-    if args.update_server_list:
-        update_command(None)
 
     config = load_config()
     if not config or not isinstance(config, dict):
         print('No configuration file found or not readable (use `vpn init` to create one)!')
         exit(1)
 
+    if is_default:
+        if 'default' in config and 'up_command' in config['default']:
+            for key, value in config['default']['up_command'].items():
+                setattr(args, key, value)
+
+    if args.update_server_list:
+        update_command(None, True)
+
     if len(config['devices']) == 0:
         print('No devices configured (use `vpn init` to create a device)!')
         exit(1)
-
-    execute_commands(config, 'pre_up')
 
     if len(args.COUNTRY_CITY_HOSTNAME) > 10:
         print('Only 10 hops are supported, you specified %d (%s)!' % (len(args.COUNTRY_CITY_HOSTNAME), args.COUNTRY_CITY_HOSTNAME))
@@ -741,11 +745,15 @@ def up_command(args):
         exit(0)
 
     physical_already_existed = network_namespace_exists(NAMESPACE_PHYSICAL)
+
+    if not physical_already_existed:
+        execute_commands(config, 'pre_up')
+
     was_already_active = is_active()
 
     if was_already_active:
         log_debug("Was already active, do a partial tear down.")
-        down_command(create_args(partial=True))
+        down_command(create_args(partial=True), True)
 
     print("Configure: %s" % description)
 
@@ -809,6 +817,7 @@ def up_command(args):
 
     if not physical_already_existed:
         run(["killall", "-w", "wpa_supplicant", "dhcpcd"], ignore_failure=True)
+        execute_commands(config, 'post_up')
 
     for device in get_network_devices():
         if device[0] != DeviceType.Virtual:
@@ -816,7 +825,19 @@ def up_command(args):
 
     update_resolvconf(get_dns_from_args(args))
 
-    execute_commands(config, 'post_up')
+    if not is_default and config and not args.dont_save:
+        if not 'default' in config:
+            config['default'] = dict()
+        if not isinstance(config['default'], dict):
+            config['default'] = dict()
+
+        args_to_save = vars(args)
+        del args_to_save['func']
+        del args_to_save['verbose']
+        del args_to_save['dry_run']
+        config['default']['up_command'] = args_to_save
+
+        save_config(config)
 
     print("VPN is successfully up!")
 
@@ -855,7 +876,7 @@ def remove_file_if_exists(filename):
         os.remove(filename)
 
 
-def down_command(args):
+def down_command(args, is_default):
     become_root()
 
     config = load_config()
@@ -894,7 +915,7 @@ def down_command(args):
     print("VPN is succefully down")
 
 
-def exec_command(args):
+def exec_command(args, is_default):
     become_root()
 
     uid = os.getenv('SUDO_UID', os.geteuid())
@@ -906,7 +927,7 @@ def exec_command(args):
     os.execvp("ip", args)
 
 
-def list_command(args):
+def list_command(args, is_default):
     servers = filter_servers(
         type=None if args.all else 'wireguard',
         active=args.active,
@@ -1018,7 +1039,7 @@ def list_command(args):
         print(table)
 
 
-def update_command(args):
+def update_command(args, is_default):
     become_root()
 
     os.makedirs('/etc/mullvad', exist_ok=True)
@@ -1056,7 +1077,7 @@ def get_network_devices():
     return devices
 
 
-def dev_command(args):
+def dev_command(args, is_default):
     become_root()
 
     devices = get_network_devices()
@@ -1128,7 +1149,7 @@ class TestCommand(TestCase):
         self.called[inspect.currentframe().f_code.co_name] = True
         return self.config
 
-    def update_command(self, args):
+    def update_command(self, args, is_default):
         self.called[inspect.currentframe().f_code.co_name] = True
 
     def request_account_number(self, passname, config):
@@ -1374,7 +1395,7 @@ def test_build_image(base_image, build, Dockerfile):
     return tag
 
 
-def test_command(args):
+def test_command(args, is_default):
     if args.docker:
         become_root()
 
@@ -1528,7 +1549,8 @@ $ vpn delete ALLIMSURE
     update.set_defaults(func=update_command)
 
     up = subparsers.add_parser('up', aliases=['u'], help=f'Set up a vpn tunnel: move all physical network devices into the physical network namespace, configure one or more mullvad server and setup a wireguard device in the root namespace. All programs from non root users are forced to use the wireguard device in the root namespace.')
-    up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname if it contains this substring (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters. The order determines the data flow. More hops require more devices (see `vpn init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the european union then use "eu". If you only want to use hops from countries on the european continent then use "ex". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leak can occur, and build a new tunnel.')
+    up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname if it contains this substring (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters. The order determines the data flow. More hops require more devices (see `vpn init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the european union then use "eu". If you only want to use hops from countries on the european continent then use "ex". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vpn up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
+    up.add_argument('-s', '--dont-save', action='store_true', help='Do not save the last call with arguments to the configuration file.')
     up.add_argument('-a', '--update-server-list', action='store_true', help='Update server list.')
     up.add_argument('-n', '--dry-run', action='store_true', help='Show only chosen hop(s) and nameserver.')
     up.add_argument('-d', '--dns', nargs=1, help='Set a blocking dns server by flags (atmpg) or with no flags use the nonblocking dns server (10.64.0.1): a = Block adverdisments, t = Block tracking, m = Block malicious sites, p = Block adult content, g = Block gampling sites.', default='')
@@ -1584,10 +1606,18 @@ $ vpn delete ALLIMSURE
         if os.geteuid() == 0:
             print(args)
 
+    defaults_parser = vars(parser.parse_args([]))
+    defaults_up = vars(up.parse_args([]))
+    defaults = {**defaults_parser, **defaults_up}
+    args_to_compare = vars(args)
+    args_to_compare['verbose'] = False
+    args_to_compare['dry_run'] = False
+    is_default = defaults == args_to_compare
+
     if not 'func' in args:
         parser.print_help()
     else:
-        args.func(args)
+        args.func(args, is_default=is_default)
 
 
 if __name__ == "__main__":
