@@ -667,7 +667,7 @@ def info_command(args, parser_up):
             print()
             print_peer_table(account['wg_peers'], peers)
             print()
-            print('Saved up command: %s' % rebuild_up_command_from_config(config, parser_up))
+            print('If you call only `vpn up` this command will be executed: %s' % rebuild_up_command_from_config(config, parser_up))
 
     finally:
         request_logout(login)
