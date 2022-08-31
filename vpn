@@ -27,7 +27,6 @@ from functools import partial
 
 setns = cdll.LoadLibrary('libc.so.6').setns
 
-# TODO: Remove ALLIMSURE from delete command (will be replaced with `vpn reset`)
 # TODO: Add the possibility to use a specific configuration name besides "default";
 # TODO: Add `vpn reset` command
 # TODO: Add documentation for PostUp/PreUp/PostDown/PostUp
@@ -500,28 +499,24 @@ def delete_command(args, is_default):
 
     config = load_config()
 
-    if args.INDEX[0] == 'ALLIMSURE':
-        devices = config['devices']
+    index = int(args.INDEX[0])
+    if index < len(config['devices']):
+        device = config['devices'][index]
     else:
-        index = int(args.INDEX[0])
-        if index < len(config['devices']):
-            devices = [config['devices'][index]]
-        else:
-            print('Device with index %d does not exists!' % index)
-            return
+        print('Device with index %d does not exists!' % index)
+        exit(1)
 
-    for idx, device in enumerate(devices):
-        account_number = request_account_number(args.passname, config)
-        login = request_login(account_number)
+    account_number = request_account_number(args.passname, config)
+    login = request_login(account_number)
 
-        try:
-            public_key = get_public_key(device['private_key'])
-            request_revoke_key(login, public_key)
-            config['devices'].remove(device)
-            save_config(config)
-            print("Deleted device %s (index %d)!" % (public_key, idx))
-        finally:
-            request_logout(login)
+    try:
+        public_key = get_public_key(device['private_key'])
+        request_revoke_key(login, public_key)
+        config['devices'].remove(device)
+        save_config(config)
+        print("Deleted device %s (index %d)!" % (public_key, index))
+    finally:
+        request_logout(login)
 
 
 def generate_private_key():
@@ -1596,7 +1591,7 @@ $ vpn status
 
 Reset:
 $ vpn down
-$ vpn delete ALLIMSURE
+$ vpn delete 0   # Repeat for all devices
 ($ vpn reset)
 """,
 
@@ -1618,7 +1613,7 @@ $ vpn delete ALLIMSURE
 
     delete = subparsers.add_parser('delete', help='Delete added device(s) from this computer from your account.', **subparser_args)
     delete.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
-    delete.add_argument('INDEX', nargs=1, metavar='INDEX', choices=['ALLIMSURE','0','1','2','3','4','5','6','7','8','9'], help='Delete specified device from this computer from your account (find index with `vpn info`) or delete all devices with "ALLIMSURE".')
+    delete.add_argument('INDEX', nargs=1, metavar='INDEX', choices=['0','1','2','3','4','5','6','7','8','9'], help='Delete specified device from this computer from your account (find index with `vpn info`).')
     delete.set_defaults(func=delete_command)
 
     info = subparsers.add_parser('info', help='View account information and highlight devices added to this computer.', **subparser_args)
