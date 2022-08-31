@@ -1146,7 +1146,8 @@ def list_command(args):
                 values.append(server['pubkey'] if 'pubkey' in server else '')
 
             if args.show_column_status_messages:
-                values.append('\n'.join(server['status_messages']))
+                messages = ['%s: %s' % (message['timestamp'], message['message']) for message in server['status_messages']]
+                values.append('\n'.join(messages))
 
             table.add_row(values)
         print(table)
