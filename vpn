@@ -30,7 +30,6 @@ setns = cdll.LoadLibrary('libc.so.6').setns
 # TODO: Add the possibility to use a specific configuration name besides "default";
 # TODO: Add `vpn reset` command
 # TODO: Add documentation for PostUp/PreUp/PostDown/PostUp
-# TODO: Show saved up command somewhere
 # TODO: Add --exit-device to up command (useful if specific ports are mapped to this device)
 
 # TODO: Make verbose output nicer, a little bit of color can not hurt
@@ -166,6 +165,47 @@ def execute_commands(config, section):
         return
     for command in config['default'][section]:
         run(['bash', '-c', command.replace('\\n', '\n')])
+
+
+def rebuild_up_command_from_config(config, parser_up):
+    default = config.get('default', {})
+    args = default.get('up_command', {})
+
+    cmdline = ['vpn', 'up']
+
+    order = [
+        'update_server_list',
+        'dns',
+        'without_multihop'
+        'uniform_by_country',
+        'owned_entry',
+        'diskless_entry',
+        'COUNTRY_CITY_HOSTNAME',
+    ]
+
+    defaults_args = vars(parser_up.parse_args([]))
+
+    for name in order:
+        if name not in args:
+            continue
+        value = args[name]
+        if name in defaults_args:
+            if defaults_args[name] == value:
+                continue
+        if name == 'COUNTRY_CITY_HOSTNAME':
+            cmdline.extend(value)
+        elif name == 'dns':
+            cmdline.append('--dns')
+            if isinstance(value, list):
+                cmdline.append(value[0])
+            else:
+                cmdline.append(value)
+        elif isinstance(value, bool):
+            cmdline.append('--%s' % name.replace('_', '-'))
+        else:
+            assert False
+
+    return subprocess.list2cmdline(cmdline)
 
 
 def device_move_to_physical(device):
@@ -441,7 +481,7 @@ def save_config(config):
     os.chmod(CONFIGURATION, 0o600)
 
 
-def init_command(args, is_default):
+def init_command(args):
     become_root()
     update_command(None, True)
 
@@ -494,7 +534,7 @@ def init_command(args, is_default):
         request_logout(login)
 
 
-def delete_command(args, is_default):
+def delete_command(args):
     become_root()
 
     config = load_config()
@@ -581,7 +621,7 @@ def print_peer_table(peers, this_peers):
     print(table)
 
 
-def info_command(args, is_default):
+def info_command(args, parser_up):
     become_root()
 
     config = load_config()
@@ -617,11 +657,14 @@ def info_command(args, is_default):
                 print('- %s-%s' % (city_port['city_code'], city_port['port']))
             print()
             print_peer_table(account['wg_peers'], peers)
+            print()
+            print('Saved up command: %s' % rebuild_up_command_from_config(config, parser_up))
+
     finally:
         request_logout(login)
 
 
-def status_command(args, is_default):
+def status_command(args):
     become_root()
 
     if is_active():
@@ -937,7 +980,7 @@ def remove_file_if_exists(filename):
         os.remove(filename)
 
 
-def down_command(args, is_default):
+def down_command(args):
     become_root()
 
     config = load_config()
@@ -977,7 +1020,7 @@ def down_command(args, is_default):
     print("VPN is succefully down")
 
 
-def exec_command(args, is_default):
+def exec_command(args):
     become_root()
 
     uid = os.getenv('SUDO_UID', os.geteuid())
@@ -988,7 +1031,7 @@ def exec_command(args, is_default):
     os.execvp("ip", args)
 
 
-def list_command(args, is_default):
+def list_command(args):
     servers = filter_servers(
         type=None if args.all else 'wireguard',
         active=args.active,
@@ -1100,7 +1143,7 @@ def list_command(args, is_default):
         print(table)
 
 
-def update_command(args, is_default):
+def update_command(args):
     become_root()
 
     os.makedirs('/etc/mullvad', exist_ok=True)
@@ -1139,7 +1182,7 @@ def get_network_devices():
     return devices
 
 
-def dev_command(args, is_default):
+def dev_command(args):
     become_root()
 
     devices = get_network_devices()
@@ -1458,7 +1501,7 @@ def test_build_image(base_image, build, Dockerfile):
     return tag
 
 
-def test_command(args, is_default):
+def test_command(args):
     if args.docker:
         become_root()
 
@@ -1486,6 +1529,17 @@ def test_command(args, is_default):
             subprocess.run(command, shell=True, check=True)
     else:
         unittest.main(argv=sys.argv[1:])
+
+
+def is_default_arguments(parser, subparser):
+    defaults_parser = vars(parser.parse_args([]))
+    defaults_subparser = vars(subparser.parse_args([]))
+    defaults = {**defaults_parser, **defaults_subparser}
+    args_to_compare = vars(args)
+    args_to_compare['verbose'] = False
+    args_to_compare['dry_run'] = False
+    args_to_compare['dont_save'] = False
+    return defaults == args_to_compare
 
 
 def vpn():
@@ -1682,18 +1736,14 @@ $ vpn delete 0   # Repeat for all devices
         if os.geteuid() == 0:
             print(args)
 
-    defaults_parser = vars(parser.parse_args([]))
-    defaults_up = vars(up.parse_args([]))
-    defaults = {**defaults_parser, **defaults_up}
-    args_to_compare = vars(args)
-    args_to_compare['verbose'] = False
-    args_to_compare['dry_run'] = False
-    is_default = defaults == args_to_compare
-
     if not 'func' in args:
         parser.print_help()
+    elif args.func == info_command:
+        args.func(args, up)
+    elif args.func == up_command:
+        args.func(args, is_default=is_default_arguments(parser, up))
     else:
-        args.func(args, is_default=is_default)
+        args.func(args)
 
 
 if __name__ == "__main__":
