@@ -492,7 +492,7 @@ def save_config(config):
 
 def init_command(args):
     become_root()
-    update_command(None, True)
+    update_command(None)
 
     config = load_config()
 
@@ -853,7 +853,7 @@ def up_command(args, is_default):
 
     if was_already_active:
         log_debug("Was already active, do a partial tear down.")
-        down_command(create_args(partial=True), True)
+        down_command(create_args(partial=True))
 
     print("Configure: %s" % description)
 
@@ -1264,7 +1264,7 @@ class TestCommand(TestCase):
         self.called[inspect.currentframe().f_code.co_name] = True
         return self.config
 
-    def update_command(self, args, is_default):
+    def update_command(self, args):
         self.called[inspect.currentframe().f_code.co_name] = True
 
     def request_account_number(self, passname, config):
@@ -1540,7 +1540,7 @@ def test_command(args):
         unittest.main(argv=sys.argv[1:])
 
 
-def is_default_arguments(parser, subparser):
+def is_default_arguments(parser, subparser, args):
     defaults_parser = vars(parser.parse_args([]))
     defaults_subparser = vars(subparser.parse_args([]))
     defaults = {**defaults_parser, **defaults_subparser}
@@ -1750,7 +1750,7 @@ $ vpn delete 0   # Repeat for all devices
     elif args.func == info_command:
         args.func(args, up)
     elif args.func == up_command:
-        args.func(args, is_default=is_default_arguments(parser, up))
+        args.func(args, is_default=is_default_arguments(parser, up, args))
     else:
         args.func(args)
 
