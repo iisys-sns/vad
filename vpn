@@ -27,18 +27,37 @@ from functools import partial
 
 setns = cdll.LoadLibrary('libc.so.6').setns
 
-# TODO: Make verbose output nicer, a little bit of color can not hurt
-# TODO: Add --exit-device to up command
+# TODO: Remove ALLIMSURE from delete command (will be replaced with `vpn reset`)
 # TODO: Add the possibility to use a specific configuration name besides "default";
-
-# TODO: Add `vpn service`, which autostart the vpn on system startup, creates the physical namespace and automatically moves new network devices into it.
-# TODO: Add commands to easily manage port forwarding: request and forward to local port (automatically add port to exit server if possible)
-#       $ vpn port 22
-
-# TODO: Add device_id and device_name to configuration file
-# TODO: Change API from wwww to mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
-# TODO: Update configuration for PostUp/PreUp/PostDown/PostUp
 # TODO: Add `vpn reset` command
+# TODO: Add documentation for PostUp/PreUp/PostDown/PostUp
+# TODO: Show saved up command somewhere
+# TODO: Add --exit-device to up command (useful if specific ports are mapped to this device)
+
+# TODO: Make verbose output nicer, a little bit of color can not hurt
+
+# TODO: Add `vpn service`, which autostarts the vpn on system startup, creates the physical namespace, automatically move new network devices into physical namespace and rotate wireguard keys every 4 days (same as in the mullvad app).
+# TODO: Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible)
+#       $ vpn port 22      # map one port from the exit server to the local port 22
+#       $ vpn port 22 443  # map two ports of the exit server to the local ports 22 and 443
+#       If this device has no port on this exit server: ask the user which port to delete and add it to the exit.
+#       If no ports are available on the account anymore, nothing we can do about it, just ask the user to delete one port on another computer.
+#       It would be possible delete a port from a device not mapped to this computer, but it depends on the use case.
+#       For now we won't delete that port automatically.
+#       Add a --volotile flag to this command to automatically delete this port on down or partial down.
+#       Ports mapping may not survive a up/down or partial up/down, because the exit can change!
+#       If the port mappings already exist this command is a no-op.
+# TODO: Change API from wwww to mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
+# TODO: Add device_id and device_name to configuration file
+# TODO: Use anonymus namespaces (except for physical); only optionally name the namespaces to allow easy access with `ip netns exec <namespace>`.
+
+# TODO: Make it possible to use get_network_devices within an specific namespace.
+#       Now it is not possible even with setns() because /sys/class/net is from the root namespace.
+
+# NOTE: It would be possible to add an namespace between the first hop and the root namespace.
+#       If now the exit stays static an partial down and up, would not break TCP connections.
+#       TCP just can not send data for a short amount of time.
+#       This idea does not seem to be useful at the moment(?).
 
 
 VERBOSE = False
