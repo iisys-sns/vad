@@ -51,10 +51,19 @@ setns = cdll.LoadLibrary('libc.so.6').setns
 
 # TODO: Make it possible to use get_network_devices within an specific namespace.
 #       Now it is not possible even with setns() because /sys/class/net is from the root namespace.
+# TODO: Add support for private/external wireguard servers.
+#       These servers are called "devices".
+#       These devices would have four additional values: ipv4, ipv6, public_key and name.
+#       Basically these devices have only one endpoint.
+#       This devices can be selected via the name in the up command, e.g.
+#       $ vpn up de dysnomia de
+#       "dysnomia" is here a hostname.
+#       The hostname search order needs to change to private-external-devices and then mullvad servers.
+#       This makes the configuration step more complicated, is this worth it?
 
 # NOTE: It would be possible to add an namespace between the first hop and the root namespace.
-#       If now the exit stays static an partial down and up, would not break TCP connections.
-#       TCP just can not send data for a short amount of time.
+#       If the exit stays static an partial down and up would not break TCP connections.
+#       It can just not send data for a short amount of time.
 #       This idea does not seem to be useful at the moment(?).
 
 
