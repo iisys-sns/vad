@@ -12,6 +12,8 @@ import sys
 import unittest
 import yaml
 
+from datetime import datetime
+from termcolor import colored
 from argparse import Namespace
 from collections import defaultdict
 from datetime import datetime
@@ -32,8 +34,6 @@ setns = cdll.LoadLibrary('libc.so.6').setns
 # TODO: Add documentation for PostUp/PreUp/PostDown/PostUp
 # TODO: Always pick the device with the most number of ports as exit
 # TODO: Add --exit-device to up command (useful if specific ports are mapped to this device)
-
-# TODO: Make verbose output nicer, a little bit of color can not hurt
 
 # TODO: Add `vpn service`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates wireguard keys every 4 days (same as the mullvad app).
 # TODO: Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible)
@@ -147,28 +147,64 @@ def become_root():
         os.execvp("sudo", ["sudo", "-E"] + sys.argv)
 
 
-def log_debug(*args, **kwargs):
+def log_verbose(text, **kwargs):
     if VERBOSE:
-        print(*args, **kwargs)
+        print(colored(text, 'cyan'), **kwargs)
 
 
-def run(args, ignore_failure=False):
+def log_info(text, highlight=False, **kwargs):
+    attrs=[]
+    if highlight:
+        attrs=['bold']
+    print(colored(text, 'blue', attrs=attrs), **kwargs)
+
+
+def log_good(text, **kwargs):
+    print(colored(text, 'green'), **kwargs)
+
+
+def log_success(text, **kwargs):
+    print(colored(text, 'green', attrs=['bold']), **kwargs)
+
+
+def log_warn(text, **kwargs):
+    print(colored(text, 'yellow'), **kwargs)
+
+
+def log_fatal(text, **kwargs):
+    log_bad(text, **kwargs)
+    exit(1)
+
+
+def log_bad(text, **kwargs):
+    print(colored(text, 'red'), **kwargs)
+
+
+def print_command(process):
+    command = subprocess.list2cmdline(process.args)
+    command = command.replace('\n','\\n')
+
+    if process.returncode == 0:
+        log_good('+ ' + command)
+    else:
+        log_bad('- ' + command)
+
+    if len(process.stdout) > 0:
+        lines = str(process.stdout, 'utf8')
+        lines = lines.split('\n')
+        output = '\n  '.join(lines)
+        output = output.strip()
+        print('  ' + output)
+
+
+def run(args, failure_ok=False):
     process = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
-    print_output = False
     if VERBOSE:
-        if process.returncode == 0:
-            command = '+ %s' % subprocess.list2cmdline(args)
-        else:
-            command = '- %s' % subprocess.list2cmdline(args)
-        print_output = True
-    else:
-        if not ignore_failure and process.returncode != 0:
-            command = '- %s' % subprocess.list2cmdline(args)
-            print_output = True
-    if print_output:
-        print(command.replace('\n','\\n'))
-        print(str(process.stdout, 'utf8'), end='')
+        print_command(process)
+    elif not failure_ok and process.returncode != 0:
+        print_command(process)
+
     return process
 
 
@@ -186,7 +222,7 @@ def execute_commands(config, section):
         return
     if not isinstance(config['default'][section], list):
         return
-    log_debug("Execute commands from the '%s' section" % section)
+    log_verbose("Execute commands from the '%s' section:" % section)
     for command in config['default'][section]:
         run(['bash', '-c', command.replace('\\n', '\n')])
 
@@ -207,7 +243,7 @@ def rebuild_up_command_from_config(config, parser_up):
         'COUNTRY_CITY_HOSTNAME',
     ]
 
-    defaults_args = vars(parser_up.parse_args([]))
+    defaults_args = dict(vars(parser_up.parse_args([])))
 
     for name in order:
         if name not in args:
@@ -235,7 +271,7 @@ def rebuild_up_command_from_config(config, parser_up):
 def device_move_to_physical(device):
     type, dev, phy = device
 
-    log_debug("Move device %s into %s namespace" % (dev, NAMESPACE_PHYSICAL))
+    log_verbose("Move device '%s' into %s namespace:" % (dev, NAMESPACE_PHYSICAL))
 
     run_or_fail(["ip", "link", "set", dev, "down"])
 
@@ -265,10 +301,9 @@ def write_wireguard_config(device_index, device, server, port=51820):
     wireguard_config = '\n'.join([line.strip() for line in wireguard_config.split('\n')])
 
     configuration_filename = CONFIGURATION_HOP % device_index
-    log_debug("Create wireguard config: %s" % configuration_filename)
+    log_verbose("Create wireguard config: %s" % configuration_filename)
     if os.path.exists(configuration_filename):
-        print("Configuration %s already exists!" % configuration_filename)
-        exit(1)
+        log_fatal("Configuration %s already exists!" % configuration_filename)
     with open(configuration_filename, 'w') as c:
         c.write(wireguard_config)
 
@@ -276,12 +311,16 @@ def write_wireguard_config(device_index, device, server, port=51820):
 
 
 def update_resolvconf(dns):
-    log_debug('Run resolvconf to add nameserver %s' % dns)
-    with subprocess.Popen(['resolvconf', '-a', '%s.vpn' % DEVICE_NAME_HOP % 0], stdin=subprocess.PIPE) as process:
+    log_verbose('Update `resolvconf` with nameserver %s:' % dns)
+    with subprocess.Popen(['resolvconf', '-a', '%s.vpn' % DEVICE_NAME_HOP % 0], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
         process.stdin.write(bytes('nameserver %s\n' % dns, 'utf8'))
         process.stdin.close()
-    if process.returncode != 0:
-        print('Error while running resolvconf, could not add nameserver %s.' % dns)
+        stdout = process.stdout.read()
+        process.stdout.close()
+        process.stdout = stdout
+    if VERBOSE:
+        print_command(process)
+    run(['resolvconf', '-u'])
 
 
 def is_active():
@@ -289,9 +328,9 @@ def is_active():
     all_exists = os.path.exists(CONFIGURATION_HOP % 0) and os.path.exists(DESCRIPTION)
 
     if not any_exists == all_exists:
-        print('Warning: If the VPN is active or inactive two things should exist or not exist:')
-        print('- %s (%s) and' % (DESCRIPTION, os.path.exists(DESCRIPTION)))
-        print('- %s (%s)' % (CONFIGURATION_HOP % 0, os.path.exists(CONFIGURATION_HOP % 0)))
+        log_warn('Warning: If the VPN is active or inactive two things should exist or not exist:')
+        log_warn('- %s (%s) and' % (DESCRIPTION, os.path.exists(DESCRIPTION)))
+        log_warn('- %s (%s)' % (CONFIGURATION_HOP % 0, os.path.exists(CONFIGURATION_HOP % 0)))
 
     return (
         os.path.exists(CONFIGURATION_HOP % 0) or
@@ -313,7 +352,7 @@ def get_dns_server_from_flags(flags):
         elif flag == 'g':
             bits |= 1<<4
         else:
-            print('Unkown flag "%s" for DNS server, we will ignore it!' % flag)
+            log_warn('Unkown flag "%s" for DNS server, we will ignore it!' % flag)
 
     if bits == 0:
         return '10.64.0.1'
@@ -327,8 +366,7 @@ def filter_servers(type='wireguard', owned=None, active=None, country_city_hostn
             with open(SERVERS) as f:
                 servers = json.load(f)
         else:
-            print('%s does not exists, please use `vpn update`, `vpn up --update-server-list` or `vpn init`.' % SERVERS)
-            exit(1)
+            log_fatal('%s does not exists, please use `vpn update`, `vpn up --update-server-list` or `vpn init`.' % SERVERS)
 
     if type is not None:
         servers = filter(lambda server: server['type'] == type, servers)
@@ -382,7 +420,7 @@ def request_account_number(passname, config):
     try:
         uid = os.getenv('SUDO_UID', os.geteuid())
         gid = os.getenv('SUDO_GID', os.getegid())
-        process = subprocess.run(['sudo', '-E', '-u', '#%s' % uid, '-g', '#%s' % gid, 'pass', passname], capture_output=True)
+        process = run(['sudo', '-E', '-u', '#%s' % uid, '-g', '#%s' % gid, 'pass', passname], failure_ok=True)
         if process.returncode == 0:
             lines = str(process.stdout, 'utf8')
             lines = lines.split('\n')
@@ -403,25 +441,22 @@ def request_account_number(passname, config):
 
 
 def request_login(account_number):
-    log_debug('request login...', end='')
+    log_verbose('request login...', end='')
     try:
         response = requests.get("https://api.mullvad.net/www/accounts/%s/" % account_number)
     except Exception as e:
-        print("Error while sending request to login (%s)!" % (str(e)))
-        exit(1)
-    log_debug('%s' % response.status_code)
+        log_fatal("Error while sending request to login (%s)!" % (str(e)))
+    log_verbose('%s' % response.status_code)
     if response.status_code != 200:
-        print("Could not login into account (%d:%s)!" % (response.status_code, response.text))
-        exit(1)
+        log_fatal("Could not login into account (%d:%s)!" % (response.status_code, response.text))
     try:
         return response.json()
     except Exception as e:
-        print("Could not parse account information (%s)!" % (str(e)))
-        exit(1)
+        log_fatal("Could not parse account information (%s)!" % (str(e)))
 
 
 def request_add_key(login):
-    log_debug('request add key...', end='')
+    log_verbose('request add key...', end='')
     private_key = generate_private_key()
     public_key = get_public_key(private_key)
     try:
@@ -435,25 +470,21 @@ def request_add_key(login):
             )
         )
     except Exception as e:
-        print("Error while sending request to adding new public key (%s)!" % (str(e)))
-        exit(1)
-    log_debug('%s' % response.status_code)
+        log_fatal("Error while sending request to adding new public key (%s)!" % (str(e)))
+    log_verbose('%s' % response.status_code)
     if response.status_code != 201:
-        print("Could not add new public key to account (%d:%s)!" % (response.status_code, response.text))
-        exit(1)
+        log_fatal("Could not add new public key to account (%d:%s)!" % (response.status_code, response.text))
     try:
         peer = json.loads(response.text)
     except Exception as e:
-        print("Adding new public key: Could not parse response (%s:%s)!" % (response.text, str(e)))
-        exit(1)
+        log_fatal("Adding new public key: Could not parse response (%s:%s)!" % (response.text, str(e)))
     if peer['key']['public'] != public_key:
-        print("Adding new public key: Public key in response should be equal to sended public key, but is not (%s (response) != %s (sended))!" % (peer['key']['public'], public_key))
-        exit(1)
+        log_fatal("Adding new public key: Public key in response should be equal to sended public key, but is not (%s (response) != %s (sended))!" % (peer['key']['public'], public_key))
     return (private_key, peer)
 
 
 def request_revoke_key(login, public_key):
-    log_debug('request revoke key %s...' % public_key, end='')
+    log_verbose('request revoke key %s...' % public_key, end='')
     try:
         response = requests.post(
             "https://api.mullvad.net/www/wg-pubkeys/revoke/",
@@ -465,14 +496,13 @@ def request_revoke_key(login, public_key):
             )
         )
     except Exception as e:
-        print("Error while sending request to revoke public key (%s)!" % (str(e)))
-        exit(1)
-    log_debug('%s' % response.status_code)
+        log_fatal("Error while sending request to revoke public key (%s)!" % (str(e)))
+    log_verbose('%s' % response.status_code)
     return response.status_code == 204
 
 
 def request_logout(login):
-    log_debug('request logout...', end='')
+    log_verbose('request logout...', end='')
     try:
         response = requests.post(
             "https://api.mullvad.net/www/expire-auth-token/",
@@ -481,9 +511,8 @@ def request_logout(login):
             )
         )
     except Exception as e:
-        print("Error while sending request to logout (%s)!" % (str(e)))
-        exit(1)
-    log_debug('%s' % response.status_code)
+        log_fatal("Error while sending request to logout (%s)!" % (str(e)))
+    log_verbose('%s' % response.status_code)
     return response.status_code in [200,204]
 
 
@@ -515,8 +544,7 @@ def init_command(args):
         if not 'devices' in config:
             config['devices'] = []
         if not args.add_device and len(config['devices']) > 0:
-            print('Already initialized with at least one device. If you want to add a new device, use `--add-device`.')
-            exit(1)
+            log_fatal('Already initialized with at least one device. If you want to add a new device, use `--add-device`.')
     else:
         config = dict(devices=[])
 
@@ -527,12 +555,10 @@ def init_command(args):
         account = login['account']
 
         if not account['active']:
-            print('Your account is expired (since %s)!' % account['expires'])
-            exit(1)
+            log_fatal('Your account is expired (since %s)!' % account['expires'])
 
         if not account['can_add_wg_peers']:
-            print('You can not add more devices, account is full!' )
-            exit(1)
+            log_fatal('You can not add more devices, account is full!' )
 
         private_key, peer = request_add_key(login)
 
@@ -567,8 +593,7 @@ def delete_command(args):
     if index < len(config['devices']):
         device = config['devices'][index]
     else:
-        print('Device with index %d does not exists!' % index)
-        exit(1)
+        log_fatal('Device with index %d does not exists!' % index)
 
     account_number = request_account_number(args.passname, config)
     login = request_login(account_number)
@@ -578,13 +603,13 @@ def delete_command(args):
         request_revoke_key(login, public_key)
         config['devices'].remove(device)
         save_config(config)
-        print("Deleted device %s (index %d)!" % (public_key, index))
+        log_info("Deleted device %s (index %d)!" % (public_key, index))
     finally:
         request_logout(login)
 
 
 def generate_private_key():
-    process = subprocess.run(['wg', 'genkey'], capture_output=True)
+    process = run(['wg', 'genkey'], failure_ok=True)
     key = str(process.stdout, 'utf8').strip()
     assert len(key) == 44
     return key
@@ -664,25 +689,49 @@ def info_command(args, parser_up):
                 print(yaml.dump(peer))
             print(yaml.dump(login['account']))
         else:
-            # NOTE: Unimportant columns:
-            # active
-            # can_add_ports
-            # can_add_wg_peers
-            # pretty_token
-            # subscription
-            # token
             account = login['account']
-            expires = datetime.strptime(account['expires'], "%Y-%m-%dT%H:%M:%S+00:00")
 
-            print('Expires: %s' % expires)
-            print('Devices: %s/%s' % (len(account['wg_peers']), account['max_wg_peers']))
-            print('Ports: %s/%s' % (len(account['ports']), account['max_ports']))
+            print('Account number: ', end='')
+            if args.show_account_number:
+                log_info(account['pretty_token'], highlight=True, end=' ')
+                print('(%s)' % account['token'])
+            else:
+                print('*' * 16)
+
+            expires = datetime.strptime(account['expires'], "%Y-%m-%dT%H:%M:%S+00:00")
+            delta = expires - datetime.now()
+            if account['active']:
+                print('Expires:', end=' ')
+                log_good(str(expires), end=' ')
+                print('(in %d days)' % delta.days)
+            else:
+                print('Expired:', end=' ')
+                log_bad(str(expires), end=' ')
+                print('(since %d days)' % (-1*delta.days))
+
+            print('Subscription: %s' % account['subscription'])
+
+            print('Devices: ', end='')
+            devices = '%s/%s' % (len(account['wg_peers']), account['max_wg_peers'])
+            if account['can_add_wg_peers']:
+                log_good(devices)
+            else:
+                log_warn(devices)
+
+            print('Ports: ', end='')
+            ports = '%s/%s' % (len(account['ports']), account['max_ports'])
+            if account['can_add_ports']:
+                log_good(ports)
+            else:
+                log_warn(ports)
+
             for city_port in account['city_ports']:
                 print('- %s-%s' % (city_port['city_code'], city_port['port']))
             print()
             print_peer_table(account['wg_peers'], peers)
             print()
-            print('If you call only `vpn up` this command will be executed: %s' % rebuild_up_command_from_config(config, parser_up))
+            log_info('If you only call `vpn up` this command will be executed: ', end='')
+            print(rebuild_up_command_from_config(config, parser_up))
 
     finally:
         request_logout(login)
@@ -694,6 +743,7 @@ def status_command(args):
     if is_active():
         try:
             with open(DESCRIPTION) as desc:
+                log_info('Configuration:', highlight=True)
                 print(desc.read().strip())
                 print()
             subprocess.run(["wg"])
@@ -703,15 +753,15 @@ def status_command(args):
                     print()
                     subprocess.run(["ip", "netns", "exec", namespace, "wg"])
         except Exception as e:
-            print("VPN seemed to be active but something went wrong (%s)" % str(e))
+            log_warn("VPN seemed to be active but something went wrong (%s)" % str(e))
         print()
 
     try:
         response = requests.get("https://am.i.mullvad.net/connected")
         if response.status_code == 200:
-            print(response.text.strip())
+            log_good(response.text.strip())
     except:
-        print("Not able to determine if connected to vpn")
+        log_bad("Not able to determine if connected to VPN.")
 
 
 def describe_server(server):
@@ -733,7 +783,7 @@ def setup_mullvad_wireguard_device(namespace_new, namespace_link_to, device_name
     else:
         prefix = 'Create'
 
-    log_debug(f"{prefix} namespace %s and link to %s (device=%s, ipv4=%s, ipv6=%s, mtu=%s)" % (
+    log_verbose(f"{prefix} namespace %s and link to %s (device=%s, ipv4=%s, ipv6=%s, mtu=%s)" % (
         namespace_new,
         namespace_link_to,
         device_name,
@@ -769,8 +819,7 @@ def up_command(args, is_default):
 
     config = load_config()
     if not config or not isinstance(config, dict):
-        print('No configuration file found or not readable (use `vpn init` to create one)!')
-        exit(1)
+        log_fatal('No configuration file found or not readable (use `vpn init` to create one)!')
 
     if is_default:
         if 'default' in config and 'up_command' in config['default']:
@@ -781,24 +830,20 @@ def up_command(args, is_default):
         update_command(None, True)
 
     if len(config['devices']) == 0:
-        print('No devices configured (use `vpn init` to create a device)!')
-        exit(1)
+        log_fatal('No devices configured (use `vpn init` to create a device)!')
 
     if len(args.COUNTRY_CITY_HOSTNAME) > 10:
-        print('Only 10 hops are supported, you specified %d (%s)!' % (len(args.COUNTRY_CITY_HOSTNAME), args.COUNTRY_CITY_HOSTNAME))
-        exit(1)
+        log_fatal('Only 10 hops are supported, you specified %d (%s)!' % (len(args.COUNTRY_CITY_HOSTNAME), args.COUNTRY_CITY_HOSTNAME))
 
     hops = len(args.COUNTRY_CITY_HOSTNAME)
     if not args.without_multihop:
         needed = math.ceil(hops / 2) - len(config['devices'])
         if needed > 0:
-            print('You do not have enough devices to build a %d hop tunnel. With multihop you need at least %d more device(s) (use `vpn init --add-device`)' % (hops, needed))
-            exit(1)
+            log_fatal('You do not have enough devices to build a %d hop tunnel. With multihop you need at least %d more device(s) (use `vpn init --add-device`)' % (hops, needed))
     else:
         needed = hops - len(config['devices'])
         if needed > 0:
-            print('You do not have enough devices to build a %d hop tunnel. Without multihop you need at least %d more device(s) (use `vpn init --add-device`)' % (hops, needed))
-            exit(1)
+            log_fatal('You do not have enough devices to build a %d hop tunnel. Without multihop you need at least %d more device(s) (use `vpn init --add-device`)' % (hops, needed))
 
     if len(args.COUNTRY_CITY_HOSTNAME) == 0:
         args.COUNTRY_CITY_HOSTNAME = ['w']
@@ -828,12 +873,10 @@ def up_command(args, is_default):
                 break
 
     if None in servers:
-        print('Filter criteria "%s" does not return any server!' %  args.COUNTRY_CITY_HOSTNAME[servers.index(None)])
-        exit(1)
+        log_fatal('Filter criteria "%s" does not return any server!' %  args.COUNTRY_CITY_HOSTNAME[servers.index(None)])
 
     if len(servers) != len(args.COUNTRY_CITY_HOSTNAME):
-        print("Could not chose unique servers for all hops! Please try again or use wider filter criteria.")
-        exit(1)
+        log_fatal("Could not chose unique servers for all hops! Please try again or use wider filter criteria.")
 
     if len(servers) % 2 != 0:
         i = iter(servers[1:])
@@ -853,10 +896,11 @@ def up_command(args, is_default):
 
     description[-1] += ' [Exit]'
     description.append('with nameserver %s' % get_dns_from_args(args))
-    description = '\n- ' + '\n- '.join(description)
+    description = '- ' + '\n- '.join(description)
 
     if args.dry_run:
-        print("Would configure: %s" % description)
+        log_info("Would configure:", highlight=True)
+        print(description)
         exit(0)
 
     physical_already_existed = network_namespace_exists(NAMESPACE_PHYSICAL)
@@ -867,10 +911,11 @@ def up_command(args, is_default):
     was_already_active = is_active()
 
     if was_already_active:
-        log_debug("Was already active, do a partial tear down.")
+        log_verbose("Was already active, do a partial tear down.")
         down_command(create_args(partial=True))
 
-    print("Configure: %s" % description)
+    log_info("Configure:", highlight=True)
+    print(description)
 
     with open(DESCRIPTION, 'w') as c:
         c.write(f"{description}\n")
@@ -931,7 +976,7 @@ def up_command(args, is_default):
         )
 
     if not physical_already_existed:
-        run(["killall", "-w", "wpa_supplicant", "dhcpcd"], ignore_failure=True)
+        run(["killall", "-w", "wpa_supplicant", "dhcpcd"], failure_ok=True)
 
     for device in get_network_devices():
         if device[0] != DeviceType.Virtual:
@@ -945,7 +990,7 @@ def up_command(args, is_default):
         if not isinstance(config['default'], dict):
             config['default'] = dict()
 
-        args_to_save = vars(args)
+        args_to_save = dict(vars(args))
         del args_to_save['func']
         del args_to_save['verbose']
         del args_to_save['dry_run']
@@ -957,7 +1002,7 @@ def up_command(args, is_default):
     if not physical_already_existed:
         execute_commands(config, 'post_up')
 
-    print("VPN is successfully up!")
+    log_success("VPN is successfully up!")
 
 
 def network_namespace_exists(namespace):
@@ -966,43 +1011,44 @@ def network_namespace_exists(namespace):
     return process.returncode == 0
 
 
-# TODO: extract from remove_network_namespace() the function delete_linked_device()
-def remove_network_namespace(namespace_to_remove, namespace_linked_to, device_name, only_delete_linked_device=False):
-    if not only_delete_linked_device:
-        log_debug("remove network namespace %s which is linked to %s" % (namespace_to_remove, namespace_linked_to))
-    else:
-        log_debug("delete device %s from linked network namespace %s (birth place: %s)" % (device_name, namespace_linked_to, namespace_to_remove))
+def remove_linked_device(namespace_to_remove, namespace_linked_to, device_name):
+    log_verbose("Delete device %s from linked network namespace %s (birth place: %s)" % (device_name, namespace_linked_to, namespace_to_remove))
 
     if namespace_linked_to == NAMESPACE_ROOT:
         run(['ip', 'link', 'del', device_name])
     else:
         run(['ip', '-n', namespace_linked_to, 'link', 'del', device_name])
 
-    if not only_delete_linked_device:
-        process = subprocess.run(['ip', 'netns', 'pids', namespace_to_remove], capture_output=True)
-        if process.returncode == 0:
-            pids = str(process.stdout, 'utf8')
-            pids = pids.split('\n')
-            pids = pids[:-1]
-            if pids:
-                run(['ip', 'netns', 'exec', namespace_to_remove, 'kill'] + pids)
 
-        if namespace_to_remove == NAMESPACE_PHYSICAL:
-            devices = get_network_devices_from_namespace(namespace_to_remove)
-            for type, name, phy in devices:
-                run(['ip', '-n', namespace_to_remove, 'link', 'set', name, 'down'])
-                if type == DeviceType.Wifi:
-                    run(['ip', 'netns', 'exec', namespace_to_remove, 'iw', 'phy', phy, 'set', 'netns', '1'])
-                elif type == DeviceType.Ethernet:
-                    run(['ip', '-n', namespace_to_remove, 'link', 'set', name, 'netns', '1'])
+def remove_network_namespace(namespace_to_remove, namespace_linked_to, device_name):
+    remove_linked_device(namespace_to_remove, namespace_linked_to, device_name)
 
-        run(['ip', 'netns', 'del', namespace_to_remove])
+    log_verbose("Remove network namespace %s which is linked to %s" % (namespace_to_remove, namespace_linked_to))
+
+    process = run(['ip', 'netns', 'pids', namespace_to_remove], failure_ok=True)
+    if process.returncode == 0:
+        pids = str(process.stdout, 'utf8')
+        pids = pids.split('\n')
+        pids = pids[:-1]
+        if pids:
+            run(['ip', 'netns', 'exec', namespace_to_remove, 'kill'] + pids)
+
+    if namespace_to_remove == NAMESPACE_PHYSICAL:
+        devices = get_network_devices_from_namespace(namespace_to_remove)
+        for type, name, phy in devices:
+            run(['ip', '-n', namespace_to_remove, 'link', 'set', name, 'down'])
+            if type == DeviceType.Wifi:
+                run(['ip', 'netns', 'exec', namespace_to_remove, 'iw', 'phy', phy, 'set', 'netns', '1'])
+            elif type == DeviceType.Ethernet:
+                run(['ip', '-n', namespace_to_remove, 'link', 'set', name, 'netns', '1'])
+
+    run(['ip', 'netns', 'del', namespace_to_remove])
 
 
 def remove_file_if_exists(filename):
     if os.path.exists(filename):
-        log_debug('remove %s' % filename)
         os.remove(filename)
+        log_verbose('Removed %s' % filename)
 
 
 def down_command(args):
@@ -1032,17 +1078,26 @@ def down_command(args):
             if interface_name == NAMESPACE_ROOT:
                 interface_name = 'mullvad0'
 
-            remove_network_namespace(
-                namespace_to_remove=namespaces[idx],
-                namespace_linked_to=namespaces[idx-1],
-                device_name=interface_name,
-                only_delete_linked_device=namespaces[idx] == NAMESPACE_PHYSICAL and args.partial
-            )
+            if namespaces[idx] == NAMESPACE_PHYSICAL and args.partial:
+                remove_linked_device(
+                    namespace_to_remove=namespaces[idx],
+                    namespace_linked_to=namespaces[idx-1],
+                    device_name=interface_name,
+                )
+            else:
+                remove_network_namespace(
+                    namespace_to_remove=namespaces[idx],
+                    namespace_linked_to=namespaces[idx-1],
+                    device_name=interface_name,
+                )
 
     if config and not args.partial:
         execute_commands(config, 'post_down')
 
-    print("VPN is succefully down")
+    if args.partial:
+        log_success("VPN is succefully down (partial)")
+    else:
+        log_success("VPN is succefully down")
 
 
 def exec_command(args):
@@ -1184,11 +1239,11 @@ def update_command(args):
                 servers.write(response.text)
             servers = filter_servers()
             os.chmod(SERVERS, 0o644)
-            print('%s updated with %d wireguard servers' % (SERVERS, len(servers)))
+            log_info('%s updated with %d wireguard servers' % (SERVERS, len(servers)))
         else:
-            print('Can not download servers from %s, because of %s' % (url_servers, response.text))
+            log_warn('Can not download servers from %s, because of %s' % (url_servers, response.text))
     except Exception as e:
-        print('Can not download servers from %s, because of %s' % (url_servers, str(e)))
+        log_warn('Can not download servers from %s, because of %s' % (url_servers, str(e)))
 
 
 def get_network_devices():
@@ -1578,7 +1633,7 @@ def is_default_arguments(parser, subparser, args):
     defaults_parser = vars(parser.parse_args([]))
     defaults_subparser = vars(subparser.parse_args([]))
     defaults = {**defaults_parser, **defaults_subparser}
-    args_to_compare = vars(args)
+    args_to_compare = dict(vars(args))
     args_to_compare['verbose'] = False
     args_to_compare['dry_run'] = False
     args_to_compare['dont_save'] = False
@@ -1695,7 +1750,8 @@ $ vpn delete 0   # Repeat for all devices
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
-    parser.add_argument('-v', '--verbose', action='store_true', help='Output verbose/debug information.')
+    parser.add_argument('-p', '--print-args', action='store_true', help='Output parsed args.')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Output verbose information.')
 
     subparsers = parser.add_subparsers()
     subparser_args = dict(
@@ -1715,6 +1771,7 @@ $ vpn delete 0   # Repeat for all devices
 
     info = subparsers.add_parser('info', help='View account information and highlight devices added to this computer.', **subparser_args)
     info.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
+    info.add_argument('-a', '--show-account-number', action='store_true', help='Shows the account number.')
     info.add_argument('-r', '--raw', action='store_true', help='Output raw account information.')
     info.set_defaults(func=info_command)
 
@@ -1776,7 +1833,7 @@ $ vpn delete 0   # Repeat for all devices
     global VERBOSE
     VERBOSE = args.verbose
 
-    if args.verbose:
+    if args.print_args:
         if os.geteuid() == 0:
             print(args)
 
