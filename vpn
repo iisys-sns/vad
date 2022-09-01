@@ -138,40 +138,41 @@ def log_debug(*args, **kwargs):
         print(*args, **kwargs)
 
 
-def run_or_fail(args):
-    process = subprocess.run(args, capture_output=not VERBOSE)
-    if process.returncode != 0:
-        if not VERBOSE:
-            print('-', subprocess.list2cmdline(args))
-            print(str(process.stdout, 'utf8'), end='')
-            print(str(process.stderr, 'utf8'), end='')
-        sys.exit(process.returncode)
-    if process.returncode == 0:
-        log_debug('+', subprocess.list2cmdline(args))
-    elif not VERBOSE:
-        log_debug('-', subprocess.list2cmdline(args))
-
-
 def run(args, ignore_failure=False):
-    process = subprocess.run(args, capture_output=not VERBOSE)
-    if not ignore_failure and process.returncode != 0:
-        if not VERBOSE:
-            print('-', subprocess.list2cmdline(args))
-            print(str(process.stderr, 'utf8'))
-    if process.returncode == 0:
-        log_debug('+', subprocess.list2cmdline(args))
-    elif not VERBOSE:
-        log_debug('-', subprocess.list2cmdline(args))
+    process = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    print_output = False
+    if VERBOSE:
+        if process.returncode == 0:
+            command = '+ %s' % subprocess.list2cmdline(args)
+        else:
+            command = '- %s' % subprocess.list2cmdline(args)
+        print_output = True
+    else:
+        if not ignore_failure and process.returncode != 0:
+            command = '- %s' % subprocess.list2cmdline(args)
+            print_output = True
+    if print_output:
+        print(command.replace('\n','\\n'))
+        print(str(process.stdout, 'utf8'), end='')
+    return process
+
+
+def run_or_fail(args):
+    process = run(args)
+    if process.returncode != 0:
+        sys.exit(process.returncode)
+    return process
 
 
 def execute_commands(config, section):
-    log_debug("Try to execute commands from the '%s' section" % section)
     if not 'default' in config:
         return
     if not section in config['default']:
         return
     if not isinstance(config['default'][section], list):
         return
+    log_debug("Execute commands from the '%s' section" % section)
     for command in config['default'][section]:
         run(['bash', '-c', command.replace('\\n', '\n')])
 
@@ -972,13 +973,13 @@ def remove_network_namespace(namespace_to_remove, namespace_linked_to, device_na
                 run(['ip', 'netns', 'exec', namespace_to_remove, 'kill'] + pids)
 
         if namespace_to_remove == NAMESPACE_PHYSICAL:
-            # get_network_devices()
-            # ip -n physical link set eth0 down
-            # ip -n physical link set eth0 netns 1
-
-            # ip -n physical link set wlan0 down
-            # ip netns exec physical iw phy phy0 set netns 1
-            pass
+            devices = get_network_devices_from_namespace(namespace_to_remove)
+            for type, name, phy in devices:
+                run(['ip', '-n', namespace_to_remove, 'link', 'set', name, 'down'])
+                if type == DeviceType.Wifi:
+                    run(['ip', 'netns', 'exec', namespace_to_remove, 'iw', 'phy', phy, 'set', 'netns', '1'])
+                elif type == DeviceType.Ethernet:
+                    run(['ip', '-n', namespace_to_remove, 'link', 'set', name, 'netns', '1'])
 
         run(['ip', 'netns', 'del', namespace_to_remove])
 
@@ -1192,10 +1193,28 @@ def get_network_devices():
     return devices
 
 
+# NOTE: This is just a workaround until we find a better way.
+# FIXME: This is very ugly! [get_network_devices_in_namespace]
+def get_network_devices_from_namespace(namespace):
+    devices = []
+    process = subprocess.run(['ip', 'netns', 'exec', namespace, sys.argv[0], 'dev', '-r'], capture_output=True, check=True)
+    if process.returncode == 0:
+        output = str(process.stdout, 'utf8')
+        return yaml.load(output, yaml.UnsafeLoader)
+    else:
+        return devices
+
+
 def dev_command(args):
     become_root()
 
     devices = get_network_devices()
+
+    # FIXME: This is very ugly! [get_network_devices_in_namespace]
+    if args.raw:
+        yaml.dump(devices, sys.stdout)
+        return
+
     for type, dev, phy in devices:
         if phy:
             print('%-10s %s (%s)' % (type.name, dev, phy))
@@ -1712,6 +1731,7 @@ $ vpn delete 0   # Repeat for all devices
     status.set_defaults(func=status_command)
 
     dev = subparsers.add_parser('dev', help='List all network devices in the current namespace.')
+    dev.add_argument('-r', '--raw', action='store_true', help='Output device information as yaml.')
     dev.set_defaults(func=dev_command)
 
     list = subparsers.add_parser('list', aliases=['l'], help='List, filter and group servers.', **subparser_args)
