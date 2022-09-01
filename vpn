@@ -21,13 +21,10 @@ from enum import Enum
 from prettytable import PrettyTable
 
 import inspect
-from ctypes import cdll
 from io import StringIO
 from requests import Response
 from contextlib import redirect_stdout
 from functools import partial
-
-setns = cdll.LoadLibrary('libc.so.6').setns
 
 # TODO: Add the possibility to use a specific configuration name besides "default";
 # TODO: Add `vpn reset` command
@@ -102,35 +99,6 @@ class DeviceType(Enum):
     Ethernet = 1
     Wifi = 2
     Virtual = 3
-
-
-def get_ns_path(nspath=None, nsname=None, nspid=None):
-    if nsname:
-        nspath = '/var/run/netns/%s' % nsname
-    elif nspid:
-        nspath = '/proc/%d/ns/net' % nspid
-
-    return nspath
-
-
-# Source: <https://stackoverflow.com/questions/28846059/can-i-open-sockets-in-multiple-network-namespaces-from-my-python-code>
-class NetworkNamespace(object):
-    def __init__(self, nsname=None, nspath=None, nspid=None):
-        self.mypath = get_ns_path(nspid=os.getpid())
-        self.targetpath = get_ns_path(nspath,
-                                  nsname=nsname,
-                                  nspid=nspid)
-
-    def __enter__(self):
-        if self.targetpath is not None:
-            self.myns = open(self.mypath)
-            with open(self.targetpath) as fd:
-                setns(fd.fileno(), 0)
-
-    def __exit__(self, *args):
-        if self.targetpath is not None:
-            setns(self.myns.fileno(), 0)
-            self.myns.close()
 
 
 # TODO: remove and replace with Namespace
