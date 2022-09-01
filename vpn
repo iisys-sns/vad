@@ -30,11 +30,12 @@ setns = cdll.LoadLibrary('libc.so.6').setns
 # TODO: Add the possibility to use a specific configuration name besides "default";
 # TODO: Add `vpn reset` command
 # TODO: Add documentation for PostUp/PreUp/PostDown/PostUp
+# TODO: Always pick the device with the most number of ports as exit
 # TODO: Add --exit-device to up command (useful if specific ports are mapped to this device)
 
 # TODO: Make verbose output nicer, a little bit of color can not hurt
 
-# TODO: Add `vpn service`, which autostarts the vpn on system startup, creates the physical namespace, automatically move new network devices into physical namespace and rotate wireguard keys every 4 days (same as in the mullvad app).
+# TODO: Add `vpn service`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates wireguard keys every 4 days (same as the mullvad app).
 # TODO: Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible)
 #       $ vpn port 22      # map one port from the exit server to the local port 22
 #       $ vpn port 22 443  # map two ports of the exit server to the local ports 22 and 443
@@ -47,7 +48,7 @@ setns = cdll.LoadLibrary('libc.so.6').setns
 #       If the port mappings already exist this command is a no-op.
 # TODO: Change API from wwww to mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
 # TODO: Add device_id and device_name to configuration file
-# TODO: Use anonymus namespaces (except for physical); only optionally name the namespaces to allow easy access with `ip netns exec <namespace>`.
+# TODO: Use anonymous namespaces (except for physical); only optionally name the namespaces to allow easy access with `ip netns exec <namespace>`.
 
 # TODO: Make it possible to use get_network_devices within an specific namespace.
 #       Now it is not possible even with setns() because /sys/class/net is from the root namespace.
@@ -61,10 +62,23 @@ setns = cdll.LoadLibrary('libc.so.6').setns
 #       The hostname search order needs to change to private-external-devices and then mullvad servers.
 #       This makes the configuration step more complicated, is this worth it?
 
+# TODO: Use "interface" for linux network interfaces and use "device" for a mullvad device
+
+# NOTE: Add --pick-different-as and remove --uniform-by-country.
+#       This flag will pick a different country and provider pair for each hop after user provided filter criteria.
+#       It will hopefully prevent picking the same (virtual/overlay) autonomous system (AS) for each hop.
+#       We use the term AS a bit loosely here.
+#       We basically want to prevent that two hops are under the control of one entity.
+#       This is not that useful at the moment because Mullvad is the only supported provider and is its own overlay AS.
+
+# NOTE: A good name for this script may be `vad` which is easy to type and the suffix of Mullvad.
+#       In the future we may support other providers.
+
 # NOTE: It would be possible to add an namespace between the first hop and the root namespace.
 #       If the exit stays static an partial down and up would not break TCP connections.
 #       It can just not send data for a short amount of time.
 #       This idea does not seem to be useful at the moment(?).
+#       What could be the use case?
 
 
 VERBOSE = False
@@ -947,11 +961,12 @@ def up_command(args, is_default):
 
 
 def network_namespace_exists(namespace):
-    # TODO: Is this replacable by os.path.exists('/var/run/netns/%s' % namespace)?
+    # TODO: Is this replaceable by os.path.exists('/var/run/netns/%s' % namespace)?
     process = subprocess.run(['ip', '-n', namespace, 'link'], capture_output=True)
     return process.returncode == 0
 
 
+# TODO: extract from remove_network_namespace() the function delete_linked_device()
 def remove_network_namespace(namespace_to_remove, namespace_linked_to, device_name, only_delete_linked_device=False):
     if not only_delete_linked_device:
         log_debug("remove network namespace %s which is linked to %s" % (namespace_to_remove, namespace_linked_to))
@@ -1240,7 +1255,6 @@ class TestDependencies(unittest.TestCase):
 
         for command in commands:
             process = subprocess.run(['bash', '-c', 'command -v %s' % command], capture_output=True)
-            # self.assertEqual(process.returncode, 0, "Command '%s' should be available!" % command)
             if process.returncode != 0:
                 print("Command '%s' should be available!" % command)
 
@@ -1708,7 +1722,7 @@ $ vpn delete 0   # Repeat for all devices
     update.set_defaults(func=update_command)
 
     up = subparsers.add_parser('up', aliases=['u'], help=f'Set up a vpn tunnel: move all physical network devices into the physical network namespace, configure one or more mullvad server and setup a wireguard device in the root namespace. All programs from non root users are forced to use the wireguard device in the root namespace.')
-    up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname if it contains this substring (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters. The order determines the data flow. More hops require more devices (see `vpn init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the european union then use "eu". If you only want to use hops from countries on the european continent then use "ex". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vpn up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
+    up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the server\'s hostname. The sequence determines the data flow. More hops require more devices (see `vpn init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the european union then use "eu". If you only want to use hops from countries on the european continent then use "ex". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vpn up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
     up.add_argument('-s', '--dont-save', action='store_true', help='Do not save the last call with arguments to the configuration file.')
     up.add_argument('-a', '--update-server-list', action='store_true', help='Update server list.')
     up.add_argument('-n', '--dry-run', action='store_true', help='Show only chosen hop(s) and nameserver.')
