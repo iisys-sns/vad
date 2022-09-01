@@ -991,8 +991,6 @@ def remove_linked_device(namespace_to_remove, namespace_linked_to, device_name):
 
 
 def remove_network_namespace(namespace_to_remove, namespace_linked_to, device_name):
-    remove_linked_device(namespace_to_remove, namespace_linked_to, device_name)
-
     log_verbose("Remove network namespace %s which is linked to %s" % (namespace_to_remove, namespace_linked_to))
 
     process = run(['ip', 'netns', 'pids', namespace_to_remove], failure_ok=True)
@@ -1048,18 +1046,20 @@ def down_command(args):
             if interface_name == NAMESPACE_ROOT:
                 interface_name = 'mullvad0'
 
-            if namespaces[idx] == NAMESPACE_PHYSICAL and args.partial:
-                remove_linked_device(
-                    namespace_to_remove=namespaces[idx],
-                    namespace_linked_to=namespaces[idx-1],
-                    device_name=interface_name,
-                )
-            else:
-                remove_network_namespace(
-                    namespace_to_remove=namespaces[idx],
-                    namespace_linked_to=namespaces[idx-1],
-                    device_name=interface_name,
-                )
+            remove_linked_device(
+                namespace_to_remove=namespaces[idx],
+                namespace_linked_to=namespaces[idx-1],
+                device_name=interface_name,
+            )
+
+            if args.partial and namespaces[idx] == NAMESPACE_PHYSICAL:
+                continue
+
+            remove_network_namespace(
+                namespace_to_remove=namespaces[idx],
+                namespace_linked_to=namespaces[idx-1],
+                device_name=interface_name,
+            )
 
     if config and not args.partial:
         execute_commands(config, 'post_down')
