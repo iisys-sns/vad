@@ -504,7 +504,6 @@ def save_config(config):
 
 def init_command(args):
     become_root()
-    update_command(None)
 
     config = load_config()
 
@@ -515,6 +514,9 @@ def init_command(args):
             log_fatal('Already initialized with at least one device. If you want to add a new device, use `--add-device`.')
     else:
         config = dict(devices=[])
+
+    if len(config['devices']) == 0:
+        update_command(None)
 
     account_number = request_account_number(args.passname, config)
     login = request_login(account_number)
@@ -545,9 +547,9 @@ def init_command(args):
         save_config(config)
 
         if len(config['devices']) == 1:
-            print('First device added (you can now use `vpn up`)')
+            log_info('First device added (you can now use `vpn up`)')
         else:
-            print('New device added')
+            log_info('New device added')
     finally:
         request_logout(login)
 
@@ -1702,7 +1704,6 @@ $ vpn init
 
 Rotate Wireguard keys for your first configured device while the vpn is active:
 $ vpn up         # Remembers the configuration from `vpn up de pl se` and builds a 3 hop tunnel
-$ vpn update     # Just in case
 $ vpn delete 0
 $ vpn init
 ($ vpn rotate)
