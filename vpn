@@ -254,15 +254,15 @@ def device_move_to_physical(device):
     run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "dhcpcd", "-b", dev])
 
 
-def write_wireguard_config(device_index, device, server, port=51820):
+def write_wireguard_config(device_index, device, public_key, address, port=51820):
     wireguard_config = f"""
         [Interface]
         PrivateKey = {device['private_key']}
 
         [Peer]
-        PublicKey = {server['pubkey']}
+        PublicKey = {public_key}
         AllowedIPs = 0.0.0.0/0,::0/0
-        Endpoint = {server['ipv4_addr_in']}:{port}
+        Endpoint = {address}:{port}
         """
 
     wireguard_config = wireguard_config.strip()
@@ -745,7 +745,7 @@ def get_dns_from_args(args):
         return get_dns_server_from_flags(args.dns[0])
 
 
-def setup_mullvad_wireguard_device(namespace_new, namespace_link_to, device_name, config_filename, ipv4, ipv6, mtu):
+def setup_mullvad_wireguard_device(namespace_new, namespace_link_to, device_name, config_filename, ipv4, ipv6, mtu, only_use_ipv6):
     update_physical_namespace = network_namespace_exists(NAMESPACE_PHYSICAL) and namespace_new == NAMESPACE_PHYSICAL
 
     if update_physical_namespace:
@@ -777,7 +777,8 @@ def setup_mullvad_wireguard_device(namespace_new, namespace_link_to, device_name
         execute_namespace = ["ip", "netns", "exec", namespace_link_to]
 
     run_or_fail(execute_namespace + ["wg", "setconf", device_name, config_filename])
-    run_or_fail(execute_namespace + ["ip", "addr", "add", ipv4, "dev", device_name])
+    if not only_use_ipv6:
+        run_or_fail(execute_namespace + ["ip", "addr", "add", ipv4, "dev", device_name])
     run_or_fail(execute_namespace + ["ip", "addr", "add", ipv6, "dev", device_name])
     run_or_fail(execute_namespace + ["ip", "link", "set", device_name, "up"])
     run_or_fail(execute_namespace + ["ip", "link", "set", device_name, "mtu", str(mtu)])
@@ -905,10 +906,8 @@ def up_command(args, is_default):
             configurations.append(write_wireguard_config(
                 device_index=idx,
                 device=device,
-                server=dict(
-                    pubkey = right['pubkey'],
-                    ipv4_addr_in = left['ipv4_addr_in'],
-                ),
+                public_key=right['pubkey'],
+                address=left['ipv6_addr_in'] if args.only_use_ipv6 else left['ipv4_addr_in'],
                 port=int(right['multihop_port'])
             ))
         if len(servers) % 2 != 0:
@@ -917,7 +916,8 @@ def up_command(args, is_default):
             configurations.append(write_wireguard_config(
                 device_index=idx,
                 device=device,
-                server=servers[0]
+                public_key=servers[0]['pubkey'],
+                address=servers[0]['ipv6_addr_in'] if args.only_use_ipv6 else servers[0]['ipv4_addr_in'],
             ))
     else:
         for server in reversed(servers):
@@ -926,7 +926,8 @@ def up_command(args, is_default):
             configurations.append(write_wireguard_config(
                 device_index=idx,
                 device=device,
-                server=server
+                public_key=server['pubkey'],
+                address=server['ipv6_addr_in'] if args.only_use_ipv6 else server['ipv4_addr_in'],
             ))
 
     namespaces[-1] = NAMESPACE_PHYSICAL
@@ -942,7 +943,9 @@ def up_command(args, is_default):
             configuration_filename,
             ipv4,
             ipv6,
-            mtu
+            mtu,
+            False
+            # args.only_use_ipv6,
         )
 
     if not physical_already_existed:
@@ -1757,6 +1760,7 @@ $ vpn delete 0   # Repeat for all devices
     up.add_argument('-u', '--uniform-by-country', action='store_true', help='Randomly select a country and then randomly select a hop.')
     up.add_argument('-o', '--owned-entry', action='store_true', help='Use a owned server by Mullvad for your entry hop.', default=None)
     up.add_argument('-b', '--diskless-entry', action='store_true', help='Use a diskless server for your entry hop (stboot [BETA]).', default=None)
+    up.add_argument('-6', '--only-use-ipv6', action='store_true', help='Only use IPv6 addresses.')
     up.set_defaults(func=up_command)
 
     down = subparsers.add_parser('down', aliases=['d'], help='Tear down the vpn configuration and restore the previous state.')
