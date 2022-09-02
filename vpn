@@ -965,6 +965,7 @@ def up_command(args, is_default):
         args_to_save = dict(vars(args))
         del args_to_save['func']
         del args_to_save['verbose']
+        del args_to_save['print_args']
         del args_to_save['dry_run']
         del args_to_save['dont_save']
         config['default']['up_command'] = args_to_save
@@ -1607,6 +1608,7 @@ def is_default_arguments(parser, subparser, args):
     defaults = {**defaults_parser, **defaults_subparser}
     args_to_compare = dict(vars(args))
     args_to_compare['verbose'] = False
+    args_to_compare['print_args'] = False
     args_to_compare['dry_run'] = False
     args_to_compare['dont_save'] = False
     return defaults == args_to_compare
