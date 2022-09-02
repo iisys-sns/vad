@@ -11,7 +11,7 @@ With network namespaces all programs from users, except programs that run with r
 An so-called "kill switch" is already integrated.
 After an `vad up`, if the vpn does not work anymore, no traffic will go out of the normal interfaces.
 The hop configuration can also be rebuild without traffic leaks.
-The physical devices will stay inaccessible in the physical namespace until an `vad down`.
+The physical devices will stay inaccessible until an `vad down`.
 
 ## Assumptions
 
