@@ -113,8 +113,8 @@ def print_command(process):
         print('  ' + output)
 
 
-def run(args, failure_ok=False):
-    process = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+def run(args, failure_ok=False, **kwargs):
+    process = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kwargs)
 
     if VERBOSE:
         print_command(process)
@@ -124,8 +124,8 @@ def run(args, failure_ok=False):
     return process
 
 
-def run_or_fail(args):
-    process = run(args)
+def run_or_fail(args, **kwargs):
+    process = run(args, **kwargs)
     if process.returncode != 0:
         sys.exit(process.returncode)
     return process
@@ -190,6 +190,7 @@ def device_move_to_physical(device):
     log_verbose("Move device '%s' into %s namespace:" % (dev, NAMESPACE_PHYSICAL))
 
     run_or_fail(["ip", "link", "set", dev, "down"])
+    run_or_fail(["resolvconf", "-f", "-d", '%s.*' % dev])
 
     if type == DeviceType.Ethernet:
         run_or_fail(["ip", "link", "set", dev, "netns", NAMESPACE_PHYSICAL])
@@ -895,10 +896,14 @@ def up_command(args, is_default):
             mtu,
             False
             # args.only_use_ipv6,
+            # TODO: Why does IPv6 only not work?
         )
 
     if not physical_already_existed:
         run(["killall", "-w", "wpa_supplicant", "dhcpcd"], failure_ok=True)
+        run(["mkdir", "-p", "/etc/netns/physical"])
+        run(["rm", "-f", "/etc/netns/physical/resolv.conf"])
+        run(["touch", "/etc/netns/physical/resolv.conf"])
 
     for device in get_network_devices():
         if device[0] != DeviceType.Virtual:
