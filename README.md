@@ -5,7 +5,7 @@ It aims to be very user friendly.
 It is based on [this](https://www.wireguard.com/netns) script.
 Even if ten hops are supported, only three may be useful in terms of performance and privacy.
 Normally, most vpn users will use only one hop.
-If you use more then one hop you may be easier identifiable by an passive external attacker, that watches traffic going into and out of the hop, due to traffic correlation.
+If you use more than one hop, you may be more easily identified by a passive external attacker watching incoming and outgoing traffic, due to traffic correlation.
 
 With network namespaces all programs from users, except programs that run with root rights, are forced to use the vpn interface to connect to the Internet, without complex iptable rules.
 An so-called "kill switch" is already integrated.
