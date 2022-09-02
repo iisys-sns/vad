@@ -21,7 +21,6 @@ The physical devices will stay inaccessible until an `vad down`.
 1. You don't have a network interface with the name `mullvad0`;
 1. You don't have wireguard configuration files with the names `/etc/wireguard/mullvad[0-9]`;
 1. You don't have other network namespaces with the name `physical` or `mullvad[1-9]`;
-1. The `resolv.conf` is shared between root and physical namespace.
 1. Uses `wpa_supplicant` to configure wlan devices (if you use e.g. NetworkManager you need to duplicate the configuration); and;
 1. You don't want to use Socks Proxies for Multihop.
 
@@ -176,6 +175,7 @@ $ vad delete 0   # Repeat for all devices
 
 ## TODOs
 
+* [ ] Fix double configuration of `wpa_supplicant`
 * [ ] Add the possibility to use a specific configuration name besides "default";
 * [ ] Add `vad reset` command
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
