@@ -1,8 +1,11 @@
 # Vad
 
 An alternative experimental command line interface (CLI) for Mullvad that is based on network namespaces and supports up to ten hops.
-It is based on the script <https://www.wireguard.com/netns>.
+It aims to be very user friendly.
+It is based on [this](https://www.wireguard.com/netns) script.
 Even if ten hops are supported, only three may be useful in terms of performance and privacy.
+
+With network namespaces all
 
 ## Assumptions
 
@@ -48,7 +51,7 @@ $ apt install python3-requests python3-yaml python3-prettytable python3-numpy su
 
 ## Untested
 
-There could be problems with other configured wireguard/vpn interfaces.
+There could be problems with other configured Wireguard/VPN interfaces.
 
 ## Example
 
@@ -123,6 +126,40 @@ $ vad up
 $ vad status
 ```
 
+Move your sshd into the physical namespace on `vpn up`:
+
+```sh
+$ vpn down   # `post_up`, `post_down`, `pre_up` and `pre_down` will not be called for a partial down and up
+$ # Add the following to your `/etc/mullavd/config.yaml`:
+[...]
+default:
+  post_down:
+  - systemctl revert sshd
+  - systemctl restart sshd
+  post_up:
+  - mkdir -p /etc/systemd/system/sshd.service.d
+  - echo -n "[Service]\nNetworkNamespacePath=/var/run/netns/physical" > /etc/systemd/system/sshd.service.d/override.conf
+  - systemctl daemon-reload
+  - systemctl restart sshd
+[...]
+$ vpn up
+```
+
+Sometimes NetworkManager interferes with the `/etc/resolv.conf` configuration, to disable it on `vpn up`:
+
+```sh
+$ vpn down
+$ # Add the following to your `/etc/mullavd/config.yaml`:
+[...]
+default:
+  post_down:
+  - systemctl start NetworkManager
+  pre_up:
+  - systemctl stop NetworkManager
+[...]
+$ vpn up
+```
+
 Reset:
 
 ```sh
@@ -135,7 +172,6 @@ $ vad delete 0   # Repeat for all devices
 
 * [ ] Add the possibility to use a specific configuration name besides "default";
 * [ ] Add `vad reset` command
-* [ ] Add documentation for PostUp/PreUp/PostDown/PostUp
 * [ ] Always pick the device with the most number of ports as exit
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
 * [ ] Use "interface" for linux network interfaces and use "device" for a mullvad device
@@ -155,8 +191,10 @@ $ vad delete 0   # Repeat for all devices
 * [ ] Change API from wwww to mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
 * [ ] Add device_id and device_name to configuration file
 * [ ] Add support for private/external wireguard servers.
-  These servers are called "devices".
-  These devices would have four additional values: ipv4, ipv6, public_key and hostname.
+  A server is split into a "device" and a "server".
+  A device has the following attributes: `private_key`, `ipv4` and `ipv6`.
+  A server has has at least the following attributes: `public_key`, `ipv4`, and `ipv6`.
+  These devices would have four additional attributes: `endpoint_ipv4`, `endpoint_ipv6`, `endpoint_public_key` and `endpoint_hostname`.
   Hostname does not need to be a real hostname.
   Basically these devices have only one endpoint.
   This devices could be selected via the hostname in the up command, e.g.
@@ -178,9 +216,9 @@ $ vad delete 0   # Repeat for all devices
 * A good name for this script may be `vad` which is easy to type and the suffix of Mullvad.
   In the future we may support other providers.
 * It would be possible to add an namespace between the first hop and the root namespace.
-  If the exit stays static an partial down and up would not break TCP connections.
+  If the exit stays static, an partial down and up would not break TCP connections.
   It can just not send data for a short amount of time.
-  This idea does not seem to be useful at the moment(?).
+  This idea does not seem to be useful at the moment.
   What could be the use case?
 
 ## Related projects
