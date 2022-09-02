@@ -27,16 +27,16 @@ from contextlib import redirect_stdout
 from functools import partial
 
 # TODO: Add the possibility to use a specific configuration name besides "default";
-# TODO: Add `vpn reset` command
+# TODO: Add `vad reset` command
 # TODO: Add documentation for PostUp/PreUp/PostDown/PostUp
 # TODO: Always pick the device with the most number of ports as exit
 # TODO: Add --exit-device to up command (useful if specific ports are mapped to this device)
 # TODO: Use "interface" for linux network interfaces and use "device" for a mullvad device
 
-# TODO: Add `vpn service`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates wireguard keys every 4 days (same as the mullvad app).
+# TODO: Add `vad service`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates wireguard keys every 4 days (same as the mullvad app).
 # TODO: Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible)
-#       $ vpn port 22      # map one port from the exit server to the local port 22
-#       $ vpn port 22 443  # map two ports of the exit server to the local ports 22 and 443
+#       $ vad port 22      # map one port from the exit server to the local port 22
+#       $ vad port 22 443  # map two ports of the exit server to the local ports 22 and 443
 #       If this device has no port on this exit server: ask the user which port to delete and add it to the exit.
 #       If no ports are available on the account anymore, nothing we can do about it, just ask the user to delete one port on another computer.
 #       It would be possible delete a port from a device not mapped to this computer, but it depends on the use case.
@@ -53,7 +53,7 @@ from functools import partial
 #       Hostname does not need to be a real hostname.
 #       Basically these devices have only one endpoint.
 #       This devices can be selected via the name in the up command, e.g.
-#       $ vpn up de dysnomia de
+#       $ vad up de dysnomia de
 #       "dysnomia" is here a hostname.
 #       The hostname search order needs to change to private-external-devices and then mullvad servers.
 #       This makes the configuration step more complicated, is this worth it?
@@ -198,7 +198,7 @@ def rebuild_up_command_from_config(config, parser_up):
     default = config.get('default', {})
     args = default.get('up_command', {})
 
-    cmdline = ['vpn', 'up']
+    cmdline = ['vad', 'up']
 
     order = [
         'update_server_list',
@@ -279,7 +279,7 @@ def write_wireguard_config(device_index, device, public_key, address, port=51820
 
 def update_resolvconf(dns):
     log_verbose('Update `resolvconf` with nameserver %s:' % dns)
-    with subprocess.Popen(['resolvconf', '-a', '%s.vpn' % DEVICE_NAME_HOP % 0], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+    with subprocess.Popen(['resolvconf', '-a', '%s.vad' % DEVICE_NAME_HOP % 0], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
         process.stdin.write(bytes('nameserver %s\n' % dns, 'utf8'))
         process.stdin.close()
         stdout = process.stdout.read()
@@ -333,7 +333,7 @@ def filter_servers(type='wireguard', owned=None, active=None, country_city_hostn
             with open(SERVERS) as f:
                 servers = json.load(f)
         else:
-            log_fatal('%s does not exists, please use `vpn update`, `vpn up --update-server-list` or `vpn init`.' % SERVERS)
+            log_fatal('%s does not exists, please use `vad update`, `vad up --update-server-list` or `vad init`.' % SERVERS)
 
     if type is not None:
         servers = filter(lambda server: server['type'] == type, servers)
@@ -546,7 +546,7 @@ def init_command(args):
         save_config(config)
 
         if len(config['devices']) == 1:
-            log_info('First device added (you can now use `vpn up`)')
+            log_info('First device added (you can now use `vad up`)')
         else:
             log_info('New device added')
     finally:
@@ -699,7 +699,7 @@ def info_command(args, parser_up):
             print()
             print_peer_table(account['wg_peers'], peers)
             print()
-            log_info('If you only call `vpn up` this command will be executed: ', end='')
+            log_info('If you only call `vad up` this command will be executed: ', end='')
             print(rebuild_up_command_from_config(config, parser_up))
 
     finally:
@@ -789,7 +789,7 @@ def up_command(args, is_default):
 
     config = load_config()
     if not config or not isinstance(config, dict):
-        log_fatal('No configuration file found or not readable (use `vpn init` to create one)!')
+        log_fatal('No configuration file found or not readable (use `vad init` to create one)!')
 
     if is_default:
         if 'default' in config and 'up_command' in config['default']:
@@ -800,7 +800,7 @@ def up_command(args, is_default):
         update_command(None, True)
 
     if len(config['devices']) == 0:
-        log_fatal('No devices configured (use `vpn init` to create a device)!')
+        log_fatal('No devices configured (use `vad init` to create a device)!')
 
     if len(args.COUNTRY_CITY_HOSTNAME) > 10:
         log_fatal('Only 10 hops are supported, you specified %d (%s)!' % (len(args.COUNTRY_CITY_HOSTNAME), args.COUNTRY_CITY_HOSTNAME))
@@ -809,11 +809,11 @@ def up_command(args, is_default):
     if not args.without_multihop:
         needed = math.ceil(hops / 2) - len(config['devices'])
         if needed > 0:
-            log_fatal('You do not have enough devices to build a %d hop tunnel. With multihop you need at least %d more device(s) (use `vpn init --add-device`)' % (hops, needed))
+            log_fatal('You do not have enough devices to build a %d hop tunnel. With multihop you need at least %d more device(s) (use `vad init --add-device`)' % (hops, needed))
     else:
         needed = hops - len(config['devices'])
         if needed > 0:
-            log_fatal('You do not have enough devices to build a %d hop tunnel. Without multihop you need at least %d more device(s) (use `vpn init --add-device`)' % (hops, needed))
+            log_fatal('You do not have enough devices to build a %d hop tunnel. Without multihop you need at least %d more device(s) (use `vad init --add-device`)' % (hops, needed))
 
     if len(args.COUNTRY_CITY_HOSTNAME) == 0:
         args.COUNTRY_CITY_HOSTNAME = ['w']
@@ -1562,7 +1562,7 @@ class TestInitCommand(TestCommand):
 def test_build_image(base_image, build, Dockerfile):
     from tempfile import TemporaryDirectory
 
-    tag = 'vpn-%s' % base_image
+    tag = 'vad-%s' % base_image
 
     if build:
         with TemporaryDirectory() as dir:
@@ -1595,7 +1595,7 @@ def test_command(args):
 
         path = sys.argv[0]
         for image in images:
-            command = f"docker run --rm -v /etc/mullvad/servers.json:/etc/mullvad/servers.json -v {path}:/bin/vpn {image} vpn test"
+            command = f"docker run --rm -v /etc/mullvad/servers.json:/etc/mullvad/servers.json -v {path}:/bin/vad {image} vad test"
             print(command)
             subprocess.run(command, shell=True, check=True)
     else:
@@ -1614,9 +1614,9 @@ def is_default_arguments(parser, subparser, args):
     return defaults == args_to_compare
 
 
-def vpn():
+def vad():
     parser = argparse.ArgumentParser(
-        prog="vpn",
+        prog="vad",
         description="""
 Based on the script from <https://www.wireguard.com/netns> with a nicer interface for Mullvad and up to ten hops (but only up to three make sense).
 
@@ -1671,53 +1671,53 @@ $ apt install python3-requests python3-yaml python3-prettytable python3-numpy su
 Examples:
 
 First use:
-$ vpn init       # Will ask for your account number and saves it
-$ vpn up
+$ vad init       # Will ask for your account number and saves it
+$ vad up
 
 Show status information:
-$ vpn status
+$ vad status
 
 The up command can be called multiple times:
-$ vpn up de      # Build one hop tunnel to a server in Germany
-$ vpn status
-$ vpn up pl      # Update one hop tunnel to a server in Poland
-$ vpn status
-$ vpn up se      # Update one hop tunnel to a server in Sweden
-$ vpn status
+$ vad up de      # Build one hop tunnel to a server in Germany
+$ vad status
+$ vad up pl      # Update one hop tunnel to a server in Poland
+$ vad status
+$ vad up se      # Update one hop tunnel to a server in Sweden
+$ vad status
 
 Build a 2 hop (multihop) tunnel:
-$ vpn up de pl      # 2 hops: Multihop(de, pl)
-$ vpn status
+$ vad up de pl      # 2 hops: Multihop(de, pl)
+$ vad status
 
 Build a 3 hop tunnel:
-$ vpn init -a       # We need one more device for the first tunnel
-$ vpn up de pl se   # 3 hops: Tunnel(de) -> Multihop(pl, se)
-$ vpn status
+$ vad init -a       # We need one more device for the first tunnel
+$ vad up de pl se   # 3 hops: Tunnel(de) -> Multihop(pl, se)
+$ vad status
 
 Update server list:
-$ vpn update
+$ vad update
 
 Show account information:
-$ vpn info
+$ vad info
 
 Rotate Wireguard keys for your first configured device:
-$ vpn down
-$ vpn delete 0
-$ vpn init
-($ vpn rotate)
+$ vad down
+$ vad delete 0
+$ vad init
+($ vad rotate)
 
 Rotate Wireguard keys for your first configured device while the vpn is active:
-$ vpn up         # Remembers the configuration from `vpn up de pl se` and builds a 3 hop tunnel
-$ vpn delete 0
-$ vpn init
-($ vpn rotate)
-$ vpn up
-$ vpn status
+$ vad up         # Remembers the configuration from `vad up de pl se` and builds a 3 hop tunnel
+$ vad delete 0
+$ vad init
+($ vad rotate)
+$ vad up
+$ vad status
 
 Reset:
-$ vpn down
-$ vpn delete 0   # Repeat for all devices
-($ vpn reset)
+$ vad down
+$ vad delete 0   # Repeat for all devices
+($ vad reset)
 """,
 
         formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1739,7 +1739,7 @@ $ vpn delete 0   # Repeat for all devices
 
     delete = subparsers.add_parser('delete', help='Delete added device(s) from this computer from your account.', **subparser_args)
     delete.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
-    delete.add_argument('INDEX', nargs=1, metavar='INDEX', choices=['0','1','2','3','4','5','6','7','8','9'], help='Delete specified device from this computer from your account (find index with `vpn info`).')
+    delete.add_argument('INDEX', nargs=1, metavar='INDEX', choices=['0','1','2','3','4','5','6','7','8','9'], help='Delete specified device from this computer from your account (find index with `vad info`).')
     delete.set_defaults(func=delete_command)
 
     info = subparsers.add_parser('info', help='View account information and highlight devices added to this computer.', **subparser_args)
@@ -1752,7 +1752,7 @@ $ vpn delete 0   # Repeat for all devices
     update.set_defaults(func=update_command)
 
     up = subparsers.add_parser('up', aliases=['u'], help=f'Set up a vpn tunnel: move all physical network devices into the physical network namespace, configure one or more mullvad server and setup a wireguard device in the root namespace. All programs from non root users are forced to use the wireguard device in the root namespace.')
-    up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the server\'s hostname. The sequence determines the data flow. More hops require more devices (see `vpn init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the european union then use "eu". If you only want to use hops from countries on the european continent then use "ex". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vpn up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
+    up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the server\'s hostname. The sequence determines the data flow. More hops require more devices (see `vad init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the european union then use "eu". If you only want to use hops from countries on the european continent then use "ex". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vad up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
     up.add_argument('-s', '--dont-save', action='store_true', help='Do not save the last call with arguments to the configuration file.')
     up.add_argument('-a', '--update-server-list', action='store_true', help='Update server list.')
     up.add_argument('-n', '--dry-run', action='store_true', help='Show only chosen hop(s) and nameserver.')
@@ -1822,4 +1822,4 @@ $ vpn delete 0   # Repeat for all devices
 
 
 if __name__ == "__main__":
-    vpn()
+    vad()
