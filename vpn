@@ -31,6 +31,7 @@ from functools import partial
 # TODO: Add documentation for PostUp/PreUp/PostDown/PostUp
 # TODO: Always pick the device with the most number of ports as exit
 # TODO: Add --exit-device to up command (useful if specific ports are mapped to this device)
+# TODO: Use "interface" for linux network interfaces and use "device" for a mullvad device
 
 # TODO: Add `vpn service`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates wireguard keys every 4 days (same as the mullvad app).
 # TODO: Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible)
@@ -45,13 +46,11 @@ from functools import partial
 #       If the port mappings already exist this command is a no-op.
 # TODO: Change API from wwww to mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
 # TODO: Add device_id and device_name to configuration file
-# TODO: Use anonymous namespaces (except for physical); only optionally name the namespaces to allow easy access with `ip netns exec <namespace>`.
 
-# TODO: Make it possible to use get_network_devices within an specific namespace.
-#       Now it is not possible even with setns() because /sys/class/net is from the root namespace.
 # TODO: Add support for private/external wireguard servers.
 #       These servers are called "devices".
-#       These devices would have four additional values: ipv4, ipv6, public_key and name.
+#       These devices would have four additional values: ipv4, ipv6, public_key and hostname.
+#       Hostname does not need to be a real hostname.
 #       Basically these devices have only one endpoint.
 #       This devices can be selected via the name in the up command, e.g.
 #       $ vpn up de dysnomia de
@@ -59,7 +58,7 @@ from functools import partial
 #       The hostname search order needs to change to private-external-devices and then mullvad servers.
 #       This makes the configuration step more complicated, is this worth it?
 
-# TODO: Use "interface" for linux network interfaces and use "device" for a mullvad device
+# NOTE: Use anonymous namespaces (except for physical); only optionally name the namespaces to allow easy access with `ip netns exec <namespace>`.
 
 # NOTE: Add --pick-different-as and remove --uniform-by-country.
 #       This flag will pick a different country and provider pair for each hop after user provided filter criteria.
