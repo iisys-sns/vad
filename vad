@@ -50,13 +50,12 @@ class DeviceType(Enum):
     Virtual = 3
 
 
-# TODO: remove and replace with Namespace
-def create_args(**kwargs):
-    class Args:
-        pass
-    args = Args()
-    args.__dict__ = {**args.__dict__, **kwargs}
-    return args
+def nop_colored(text, *args, **kwargs):
+    return text
+
+
+if not sys.stdout.isatty() or not sys.stderr.isatty():
+    colored = nop_colored
 
 
 def become_root():
@@ -665,6 +664,7 @@ def status_command(args):
                 log_info('Configuration:', highlight=True)
                 print(desc.read().strip())
                 print()
+                sys.stdout.flush()
             subprocess.run(["wg"])
             for idx in range(1, 10):
                 namespace = NAME + str(idx)
@@ -832,7 +832,7 @@ def up_command(args, is_default):
 
     if was_already_active:
         log_verbose("Was already active, do a partial tear down.")
-        down_command(create_args(partial=True))
+        down_command(Namespace(partial=True))
 
     log_info("Configure:", highlight=True)
     print(description)
@@ -929,9 +929,7 @@ def up_command(args, is_default):
 
 
 def network_namespace_exists(namespace):
-    # TODO: Is this replaceable by os.path.exists('/var/run/netns/%s' % namespace)?
-    process = subprocess.run(['ip', '-n', namespace, 'link'], capture_output=True)
-    return process.returncode == 0
+    return os.path.exists('/var/run/netns/%s' % namespace)
 
 
 def remove_linked_device(namespace_to_remove, namespace_linked_to, device_name):
@@ -1425,7 +1423,7 @@ class TestRequestLogin(TestCase):
 
 class TestInitCommand(TestCommand):
     def testSaveAccountNumber(self):
-        out = self.capture(partial(init_command, create_args(
+        out = self.capture(partial(init_command, Namespace(
             save_account_number=True,
             passname='pasname'
         )))
@@ -1437,7 +1435,7 @@ class TestInitCommand(TestCommand):
             save_account_number=False,
             account_number='TEST',
         )
-        out = self.capture(partial(init_command, create_args(
+        out = self.capture(partial(init_command, Namespace(
             add_device=False,
             save_account_number=False,
             passname='pasname'
@@ -1449,7 +1447,7 @@ class TestInitCommand(TestCommand):
         self.config = dict(
             devices=[dict()]
         )
-        out = self.capture(partial(init_command, create_args(
+        out = self.capture(partial(init_command, Namespace(
             save_account_number=False,
             add_device=True,
             passname='pasname'
@@ -1461,7 +1459,7 @@ class TestInitCommand(TestCommand):
         self.config = dict(
             devices=[dict()]
         )
-        out = self.capture(partial(self.assertExit, partial(init_command, create_args(
+        out = self.capture(partial(self.assertExit, partial(init_command, Namespace(
             save_account_number=False,
             add_device=False,
             passname='pasname'
@@ -1470,7 +1468,7 @@ class TestInitCommand(TestCommand):
 
     def testNotActive(self):
         self.request_login_result['account']['active'] = False
-        out = self.capture(partial(self.assertExit, partial(init_command, create_args(
+        out = self.capture(partial(self.assertExit, partial(init_command, Namespace(
             save_account_number=False,
             add_device=True,
             passname='pasname'
@@ -1480,7 +1478,7 @@ class TestInitCommand(TestCommand):
 
     def testNoMoreDevices(self):
         self.request_login_result['account']['can_add_wg_peers'] = False
-        out = self.capture(partial(self.assertExit, partial(init_command, create_args(
+        out = self.capture(partial(self.assertExit, partial(init_command, Namespace(
             save_account_number=False,
             add_device=True,
             passname='pasname'
@@ -1489,7 +1487,7 @@ class TestInitCommand(TestCommand):
         self.assertTrue(self.called['request_logout'])
 
     def test(self):
-        out = self.capture(partial(init_command, create_args(
+        out = self.capture(partial(init_command, Namespace(
             save_account_number=False,
             add_device=True,
             passname='pasname'
