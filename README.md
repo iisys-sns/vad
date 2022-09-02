@@ -172,10 +172,62 @@ $ vad delete 0   # Repeat for all devices
 
 * [ ] Add the possibility to use a specific configuration name besides "default";
 * [ ] Add `vad reset` command
-* [ ] Always pick the device with the most number of ports as exit
+* [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
 * [ ] Use "interface" for linux network interfaces and use "device" for a mullvad device
-* [ ] Add `vad service`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates wireguard keys every 4 days (same as the mullvad app).
+* [ ] Add `vad move mv`, `vad service add` and `vad service rm`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates wireguard keys every 4 days (same as the mullvad app).
+  Look at [example](https://unix.stackexchange.com/questions/460028/automatically-move-physical-network-interfaces-to-namespace).
+  Automatically move device to and create if not exists the physical namespace (Test with `udevadm test --action="add" <device>` and enable with `udevadm control --reload`):
+  ```
+  /etc/udev/rules.d/vad.rules
+  ---------------------------
+  SUBSYSTEM=="net", ACTION=="add", DEVPATH!="/devices/virtual/*", RUN+="vad mv"
+  ```
+  Automatically execute key rotation every 4 days:
+  ```
+  /usr/local/lib/system/vad.rotate.service
+  ----------------------------------------
+  [Unit]
+  Description=Rotate Wireguard keys of all devices
+
+  [Service]
+  Type=oneshot
+  ExecStart=vad rotate
+  ```
+  `OnCalendar` of the timer is testable with: `systemd-analyze calendar --iterations=8 '*-*-2/4'`.
+  List timers: `systemctl list-timers --all`.
+  ```
+  /usr/local/lib/systemd/vad.rotate.timer
+  ---------------------------------------
+  [Unit]
+  Description=Rotate Wireguard keys of all devices every 4 days
+
+  [Timer]
+  OnCalendar=*-*-2/4
+  Persistent=true
+
+  [Install]
+  WantedBy=timers.target
+  ```
+  Automatically start vad on system startup:
+  ```
+  /usr/local/lib/systemd/vad.service
+  ----------------------------------
+  [Unit]
+  Description=Starts VPN on system startup
+  After=syslog.target network.target
+  Wants=network.target
+
+  [Service]
+  Type=oneshot
+  RemainAfterExit=yes
+  ExecSearchPath=/usr/local/bin:/usr/bin
+  ExecStart=vad up
+
+  [Install]
+  WantedBy=multi-user.target
+  ```
+  To enable `systemctl daemon-reload`, `systemctl enable vad.rotate.timer` and `systemctl enable vad`.
 * [ ] Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible).
   ```sh
   $ vad port 22      # map one port from the exit server to the local port 22
