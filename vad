@@ -512,7 +512,7 @@ def delete_command(args):
     if index < len(config['devices']):
         device = config['devices'][index]
     else:
-        log_fatal('Device with index %d does not exists!' % index)
+        log_warn('Device with index %d does not exists!' % index)
 
     account_number = request_account_number(args.passname, config)
     login = request_login(account_number)
@@ -1158,6 +1158,28 @@ def list_command(args):
         print(table)
 
 
+def reset_command(args):
+    become_root()
+
+    # TODO: remove services added through `vpn service`
+
+    config = load_config()
+    devices = config.get('devices', [])
+    for device in devices:
+        delete_command(Namespace(INDEX=['0'], passname='web/mullvad'))
+
+    config = load_config()
+
+    down_command(Namespace(partial=False))
+
+    if 'account_number' in config:
+        del config['account_number']
+
+    save_config(config)
+
+    log_success("Successfully reseted")
+
+
 def update_command(args):
     become_root()
 
@@ -1654,6 +1676,9 @@ def vad():
     list.add_argument('-i', '--inactive', dest='active', action='store_false', help='Filter by inactive servers.', default=None)
     list.add_argument('-b', '--diskless', action='store_true', help='Filter by diskless boot servers (stboot [BETA]).', default=None)
     list.set_defaults(func=list_command)
+
+    reset = subparsers.add_parser('reset', help='Tear down vpn, delete all mapped devices to this computer, remove services added through `vpn service` and remove account related information from configuration')
+    reset.set_defaults(func=reset_command)
 
     test = subparsers.add_parser('test', help='Run unittests.')
     test.add_argument('-d', '--docker', action='store_true', help='Run the tests in different docker images (archlinux, ubuntu, debian).')

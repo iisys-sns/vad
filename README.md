@@ -168,16 +168,18 @@ $ vpn up
 Reset:
 
 ```sh
-$ vad down
-$ vad delete 0   # Repeat for all devices
-($ vad reset)
+$ vad reset
+$ # Deletes account number from configuration file but is otherwise equivalent to:
+$ # vpn delete 0 (repeated for every mapped device)
+$ # vpn service -r (TODO)
+$ # vpn down
 ```
 
 ## TODOs
 
+* [ ] Add lock file
 * [ ] Fix double configuration of `wpa_supplicant`
 * [ ] Add the possibility to use a specific configuration name besides "default";
-* [ ] Add `vad reset` command
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
 * [ ] Use "interface" for linux network interfaces and use "device" for a mullvad device
