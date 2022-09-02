@@ -1,6 +1,6 @@
 # Vad
 
-An alternative command line interface (CLI) for Mullvad that is based on network namespaces and supports up to ten hops.
+An alternative experimental command line interface (CLI) for Mullvad that is based on network namespaces and supports up to ten hops.
 It is based on the script <https://www.wireguard.com/netns>.
 Even if ten hops are supported, only three may be useful in terms of performance and privacy.
 
@@ -9,7 +9,6 @@ Even if ten hops are supported, only three may be useful in terms of performance
 1. Only works under Linux (requires network namespaces);
 1. You have a Mullvad account;
 1. You only want to use Wireguard servers (not OpenVPN);
-1. You only want to use the IPv4 address of the server/endpoint;
 1. You don't have a network interface with the name `mullvad0`;
 1. You don't have wireguard configuration files with the names `/etc/wireguard/mullvad[0-9]`;
 1. You don't have other network namespaces with the name `physical` or `mullvad[1-9]`;
@@ -38,7 +37,7 @@ Even if ten hops are supported, only three may be useful in terms of performance
 Arch Linux based:
 
 ```sh
-$ pacman -Syu --needed python-requests python-yaml python-prettytable python-numpy sudo iw wpa_supplicant dhcpcd wireguard-tools
+$ pacman -Syu --needed python-requests python-yaml python-prettytable python-numpy sudo iw wpa_supplicant dhcpcd openresolv wireguard-tools
 ```
 
 Debian based:
@@ -138,7 +137,7 @@ $ vad delete 0   # Repeat for all devices
 * [ ] Add `vad reset` command
 * [ ] Add documentation for PostUp/PreUp/PostDown/PostUp
 * [ ] Always pick the device with the most number of ports as exit
-* [ ] Add --exit-device to up command (useful if specific ports are mapped to this device)
+* [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
 * [ ] Use "interface" for linux network interfaces and use "device" for a mullvad device
 * [ ] Add `vad service`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates wireguard keys every 4 days (same as the mullvad app).
 * [ ] Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible).
@@ -150,7 +149,7 @@ $ vad delete 0   # Repeat for all devices
   If no ports are available on the account anymore, nothing we can do about it, just ask the user to delete one port on another computer.
   It would be possible delete a port from a device not mapped to this computer, but it depends on the use case.
   For now we won't delete that port automatically.
-  Add a --volotile flag to this command to automatically delete this port on down or partial down.
+  Add a `--volotile` flag to this command to automatically delete this port on down or partial down.
   Ports mapping may not survive a up/down or partial up/down, because the exit can change!
   If the port mappings already exist this command is a no-op.
 * [ ] Change API from wwww to mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
@@ -170,7 +169,7 @@ $ vad delete 0   # Repeat for all devices
 ## Ideas
 
 * Use anonymous namespaces (except for physical); only optionally name the namespaces to allow easy access with `ip netns exec <namespace>`.
-* Add --pick-different-as and remove --uniform-by-country.
+* Add `--pick-different-as` and remove `--uniform-by-country`.
   This flag will pick a different country and provider pair for each hop after user provided filter criteria.
   It will hopefully prevent picking the same (virtual/overlay) autonomous system (AS) for each hop.
   We use the term AS a bit loosely here.
@@ -194,4 +193,3 @@ $ vad delete 0   # Repeat for all devices
 * <https://github.com/nurupo/pia-wg-netns-vpn>
 * <https://github.com/amonakov/vpn-netns>
 * <https://github.com/pekman/openvpn-netns>
-
