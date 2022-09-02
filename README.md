@@ -295,8 +295,6 @@ $ vad delete 0   # Repeat for all devices
   We use the term AS a bit loosely here.
   We basically want to prevent that two hops are under the control of one entity.
   This is not that useful at the moment because Mullvad is the only supported provider and is its own overlay AS.
-* A good name for this script may be `vad` which is easy to type and the suffix of Mullvad.
-  In the future we may support other providers.
 * It would be possible to add an namespace between the first hop and the root namespace.
   If the exit stays static, an partial down and up would not break TCP connections.
   It can just not send data for a short amount of time.
