@@ -4,8 +4,14 @@ An alternative experimental command line interface (CLI) for Mullvad that is bas
 It aims to be very user friendly.
 It is based on [this](https://www.wireguard.com/netns) script.
 Even if ten hops are supported, only three may be useful in terms of performance and privacy.
+Normally, most vpn users will use only one hop.
+If you use more then one hop you may be easier identifiable by an passive external attacker, that watches traffic going into and out of the hop, due to traffic correlation.
 
-With network namespaces all
+With network namespaces all programs from users, except programs that run with root rights, are forced to use the vpn interface to connect to the Internet, without complex iptable rules.
+An so-called "kill switch" is already integrated.
+After an `vad up`, if the vpn does not work anymore, no traffic will go out of the normal interfaces.
+The vpn hop configuration can also be rebuild without traffic leaks.
+The physical devices will stay in the physical namespace until an `vad down`.
 
 ## Assumptions
 
@@ -204,6 +210,30 @@ $ vad delete 0   # Repeat for all devices
 
   [Timer]
   OnCalendar=*-*-2/4
+  Persistent=true
+
+  [Install]
+  WantedBy=timers.target
+  ```
+  Automatically execute vpn up daily:
+  ```
+  /usr/local/lib/system/vad.up.service
+  ------------------------------------
+  [Unit]
+  Description=Execute vpn up
+
+  [Service]
+  Type=oneshot
+  ExecStart=vad up
+  ```
+  ```
+  /usr/local/lib/systemd/vad.up.timer
+  -----------------------------------
+  [Unit]
+  Description=Execute vad up daily to connect to other servers
+
+  [Timer]
+  OnCalendar=daily
   Persistent=true
 
   [Install]
