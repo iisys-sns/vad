@@ -10,8 +10,8 @@ If you use more then one hop you may be easier identifiable by an passive extern
 With network namespaces all programs from users, except programs that run with root rights, are forced to use the vpn interface to connect to the Internet, without complex iptable rules.
 An so-called "kill switch" is already integrated.
 After an `vad up`, if the vpn does not work anymore, no traffic will go out of the normal interfaces.
-The vpn hop configuration can also be rebuild without traffic leaks.
-The physical devices will stay in the physical namespace until an `vad down`.
+The hop configuration can also be rebuild without traffic leaks.
+The physical devices will stay inaccessible in the physical namespace until an `vad down`.
 
 ## Assumptions
 
