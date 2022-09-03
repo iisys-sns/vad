@@ -191,6 +191,9 @@ $ # vad down
 
 ## TODOs
 
+* [ ] Add documentation comments
+* [ ] Use typing hinting in conjunction with `mypy`
+* [ ] Implement a configuration class and api request class
 * [ ] Test if dependencies are installed while launching
 * [ ] Execute `vad down` if `vad up` fails on the critical path
 * [ ] Fix double configuration of `wpa_supplicant`
