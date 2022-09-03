@@ -347,7 +347,7 @@ def request_login(account_number):
     except Exception as e:
         log_fatal("Error while sending request to login (%s)!" % (str(e)))
     log_verbose('%s' % response.status_code)
-    if not response.ok():
+    if not response.ok:
         log_fatal("Could not login into account (%d:%s)!" % (response.status_code, response.text))
     try:
         return response.json()
@@ -367,7 +367,7 @@ def request_account(login):
         log_verbose('%s' % response.status_code)
     except Exception as e:
         log_fatal("Error while sending request to receive account information (%s)!" % (str(e)))
-    if not response.ok():
+    if not response.ok:
         log_fatal("Could not receive account information (%d:%s)!" % (response.status_code, response.text))
     try:
         return response.json()
@@ -394,7 +394,7 @@ def request_login_api(account_number, config):
     except Exception as e:
         log_fatal("Error while sending request to login into api (%s)!" % (str(e)))
 
-    if not response.ok():
+    if not response.ok:
         log_fatal("Could not login into api (%d:%s)!" % (response.status_code, response.text))
 
     try:
@@ -428,7 +428,7 @@ def request_add_key(login):
     except Exception as e:
         log_fatal("Error while sending request to adding new public key (%s)!" % (str(e)))
     log_verbose('%s' % response.status_code)
-    if not response.ok():
+    if not response.ok:
         log_fatal("Could not add new public key to account (%d:%s)!" % (response.status_code, response.text))
     try:
         peer = response.json()
@@ -460,7 +460,7 @@ def request_update_public_key(config, device):
         log_verbose('%s' % response.status_code)
     except Exception as e:
         log_fatal("Error while sending request to update public key for device %s (%s)!" % (device['device_id'], str(e)))
-    if not response.ok():
+    if not response.ok:
         log_fatal("Could not update public key to account (%d:%s)!" % (response.status_code, response.text))
 
     try:
@@ -488,7 +488,7 @@ def request_revoke_key(login, public_key):
     except Exception as e:
         log_fatal("Error while sending request to revoke public key (%s)!" % (str(e)))
     log_verbose('%s' % response.status_code)
-    return response.ok()
+    return response.ok
 
 
 def request_logout(login):
@@ -503,7 +503,7 @@ def request_logout(login):
     except Exception as e:
         log_fatal("Error while sending request to logout (%s)!" % (str(e)))
     log_verbose('%s' % response.status_code)
-    return response.ok()
+    return response.ok
 
 
 def config_load():
@@ -933,7 +933,7 @@ def print_status_connected():
         response = requests.get("https://am.i.mullvad.net/connected")
         if 'You are not' in response.text:
             log_bad(response.text.strip())
-        elif response.ok():
+        elif response.ok:
             log_good(response.text.strip())
         else:
             log_bad(response.text.strip())
@@ -1409,7 +1409,7 @@ def update_command(args):
     try:
         response = requests.get(url_servers)
 
-        if response.ok():
+        if response.ok:
             with open(SERVERS, 'w') as servers:
                 servers.write(response.text)
             servers = filter_servers()
