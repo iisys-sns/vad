@@ -181,7 +181,7 @@ $ # vpn down
 * [ ] Add the possibility to use a specific configuration name besides "default";
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
-* [ ] Use "interface" for linux network interfaces and use "device" for a Mullvad device
+* [ ] Terminology is a bit confusing at the moment, e.g. we use "device" for linux interfaces and Mullvad devices.
 * [ ] Add `vad move mv`, `vad service add` and `vad service rm`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates WireGuard keys every 4 days (same as the mullvad app).
   Look at [example](https://unix.stackexchange.com/questions/460028/automatically-move-physical-network-interfaces-to-namespace).
   Automatically move device to and create if not exists the physical namespace (Test with `udevadm test --action="add" <device>` and enable with `udevadm control --reload`):
