@@ -62,13 +62,20 @@ if not sys.stdout.isatty() or not sys.stderr.isatty():
     colored = nop_colored
 
 
+already_locked = False
+
+
 def lock():
+    global already_locked
+    if already_locked:
+        return
     os.makedirs(RUN_DIR, exist_ok=True)
     fd = open(LOCK_FILE, 'a')
     fcntl.lockf(fd, fcntl.LOCK_EX)
     fd.write('%s\n' % os.getpid())
     fd.flush()
     atexit.register(lambda: partial(unlock, fd)())
+    already_locked = True
 
 
 def unlock(fd):
