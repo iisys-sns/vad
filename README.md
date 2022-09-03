@@ -269,7 +269,7 @@ $ # vpn down
   If no ports are available on the account anymore, nothing we can do about it, just ask the user to delete one port on another computer.
   It would be possible delete a port from a device not mapped to this computer, but it depends on the use case.
   For now we won't delete that port automatically.
-  Add a `--volotile` flag to this command to automatically delete this port on down or partial down.
+  Add a `--volatile` flag to this command to automatically delete this port on down or partial down.
   Ports mapping may not survive a up/down or partial up/down, because the exit can change!
   If the port mappings already exist this command is a no-op.
 * [ ] Change API from wwww to Mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
