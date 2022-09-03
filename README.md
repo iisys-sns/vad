@@ -177,7 +177,6 @@ $ # vpn down
 
 ## TODOs
 
-* [ ] Add lock file
 * [ ] Fix double configuration of `wpa_supplicant`
 * [ ] Add the possibility to use a specific configuration name besides "default";
 * [ ] Always pick the device with the most number of ports as exit where the city code matches

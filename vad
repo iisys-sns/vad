@@ -11,6 +11,8 @@ import subprocess
 import sys
 import unittest
 import yaml
+import fcntl
+import atexit
 
 from datetime import datetime
 from termcolor import colored
@@ -32,6 +34,8 @@ VERBOSE = False
 
 PREFIX = '/etc'
 NAME = 'mullvad'
+RUN_DIR = '/var/run/vad'
+LOCK_FILE = f'{RUN_DIR}/lock'
 CONFIGURATION_HOP = f'{PREFIX}/wireguard/{NAME}%d.conf'
 DEVICE_NAME_HOP = f'{NAME}%d'
 NAMESPACE_HOP = f'{NAME}%d'
@@ -58,9 +62,34 @@ if not sys.stdout.isatty() or not sys.stderr.isatty():
     colored = nop_colored
 
 
-def become_root():
+def lock():
+    os.makedirs(RUN_DIR, exist_ok=True)
+    fd = open(LOCK_FILE, 'a')
+    fcntl.lockf(fd, fcntl.LOCK_EX)
+    fd.write('%s\n' % os.getpid())
+    fd.flush()
+    atexit.register(lambda: partial(unlock, fd)())
+
+
+def unlock(fd):
+    sys.stdout.flush()
+    fcntl.lockf(fd, fcntl.LOCK_UN)
+    fd.truncate(0)
+    fd.close()
+
+
+def become_root(do_lock=True):
     if os.geteuid() != 0:
         os.execvp("sudo", ["sudo", "-E"] + sys.argv)
+
+    # NOTE: Everytime we become root, we want usually to do some atomic
+    # operation, to prevent race conditions, we want to serialize the execution with
+    # a file lock
+    if do_lock:
+        try:
+            lock()
+        except Exception as e:
+            log_fatal("Can not acquire file lock (%s)!" % str(e))
 
 
 def log_verbose(text, **kwargs):
@@ -1232,7 +1261,7 @@ def get_network_devices_from_namespace(namespace):
 
 
 def dev_command(args):
-    become_root()
+    become_root(do_lock=False)
 
     devices = get_network_devices()
 
@@ -1695,14 +1724,17 @@ def vad():
         if os.geteuid() == 0:
             print(args)
 
-    if not 'func' in args:
-        parser.print_help()
-    elif args.func == info_command:
-        args.func(args, up)
-    elif args.func == up_command:
-        args.func(args, is_default=is_default_arguments(parser, up, args))
-    else:
-        args.func(args)
+    try:
+        if not 'func' in args:
+            parser.print_help()
+        elif args.func == info_command:
+            args.func(args, up)
+        elif args.func == up_command:
+            args.func(args, is_default=is_default_arguments(parser, up, args))
+        else:
+            args.func(args)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
