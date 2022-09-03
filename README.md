@@ -17,9 +17,9 @@ The physical devices will stay inaccessible until an `vad down`.
 
 1. Only works under Linux (requires network namespaces);
 1. You have a Mullvad account;
-1. You only want to use Wireguard servers (not OpenVPN);
+1. You only want to use WireGuard servers (not OpenVPN);
 1. You don't have a network interface with the name `mullvad0`;
-1. You don't have wireguard configuration files with the names `/etc/wireguard/mullvad[0-9]`;
+1. You don't have WireGuard configuration files with the names `/etc/wireguard/mullvad[0-9]`;
 1. You don't have other network namespaces with the name `physical` or `mullvad[1-9]`;
 1. Uses `wpa_supplicant` to configure wlan devices (if you use e.g. NetworkManager you need to duplicate the configuration); and;
 1. You don't want to use Socks Proxies for Multihop.
@@ -56,7 +56,7 @@ $ apt install python3-requests python3-yaml python3-prettytable python3-numpy su
 
 ## Untested
 
-There could be problems with other configured Wireguard/VPN interfaces.
+There could be problems with other configured WireGuard/VPN interfaces.
 
 ## Example
 
@@ -111,7 +111,7 @@ Show account information:
 $ vad info
 ```
 
-Rotate Wireguard keys for your first configured device:
+Rotate WireGuard keys for your first configured device:
 
 ```sh
 $ vad down
@@ -120,7 +120,7 @@ $ vad init
 ($ vad rotate)
 ```
 
-Rotate Wireguard keys for your first configured device while the vpn is active:
+Rotate WireGuard keys for your first configured device while the vpn is active:
 
 ```sh
 $ vad up         # Remembers the configuration from `vad up de pl se` and builds a 3 hop tunnel
@@ -182,8 +182,8 @@ $ # vpn down
 * [ ] Add the possibility to use a specific configuration name besides "default";
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
-* [ ] Use "interface" for linux network interfaces and use "device" for a mullvad device
-* [ ] Add `vad move mv`, `vad service add` and `vad service rm`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates wireguard keys every 4 days (same as the mullvad app).
+* [ ] Use "interface" for linux network interfaces and use "device" for a Mullvad device
+* [ ] Add `vad move mv`, `vad service add` and `vad service rm`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates WireGuard keys every 4 days (same as the mullvad app).
   Look at [example](https://unix.stackexchange.com/questions/460028/automatically-move-physical-network-interfaces-to-namespace).
   Automatically move device to and create if not exists the physical namespace (Test with `udevadm test --action="add" <device>` and enable with `udevadm control --reload`):
   ```
@@ -196,7 +196,7 @@ $ # vpn down
   /usr/local/lib/system/vad.rotate.service
   ----------------------------------------
   [Unit]
-  Description=Rotate Wireguard keys of all devices
+  Description=Rotate WireGuard keys of all devices
 
   [Service]
   Type=oneshot
@@ -208,7 +208,7 @@ $ # vpn down
   /usr/local/lib/systemd/vad.rotate.timer
   ---------------------------------------
   [Unit]
-  Description=Rotate Wireguard keys of all devices every 4 days
+  Description=Rotate WireGuard keys of all devices every 4 days
 
   [Timer]
   OnCalendar=*-*-2/4
@@ -272,9 +272,9 @@ $ # vpn down
   Add a `--volotile` flag to this command to automatically delete this port on down or partial down.
   Ports mapping may not survive a up/down or partial up/down, because the exit can change!
   If the port mappings already exist this command is a no-op.
-* [ ] Change API from wwww to mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
-* [ ] Add device_id and device_name to configuration file
-* [ ] Add support for private/external wireguard servers.
+* [ ] Change API from wwww to Mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
+* [ ] Add `device_id` and `device_name` to configuration file
+* [ ] Add support for private/external WireGuard servers.
   A server is split into a "device" and a "server".
   A device has the following attributes: `private_key`, `ipv4` and `ipv6`.
   A server has has at least the following attributes: `public_key`, `ipv4`, and `ipv6`.
@@ -285,8 +285,8 @@ $ # vpn down
   ```
   $ vad up de dysnomia de
   ```
-  The hostname search order needs to change to private-external-devices and then mullvad servers.
-  This makes the configuration step more complicated, is this worth it?
+  The hostname search order needs to change to private-external-devices and then Mullvad servers.
+  This makes the configuration step more complicated, is it worth it?
 
 ## Ideas
 
@@ -297,11 +297,11 @@ $ # vpn down
   We use the term AS a bit loosely here.
   We basically want to prevent that two hops are under the control of one entity.
   This is not that useful at the moment because Mullvad is the only supported provider and is its own overlay AS.
-* It would be possible to add an namespace between the first hop and the root namespace.
-  If the exit stays static, an partial down and up would not break TCP connections.
-  It can just not send data for a short amount of time.
-  This idea does not seem to be useful at the moment.
-  What could be the use case?
+* It would be possible not to break TCP connections if two conditions are met.
+  First, you need a static ip address for the exit hop, that is already possible, you can just set a hostname as last hop.
+  Second, the WireGuard interface `mullvad0` in the root namespace must not be deleted with an partial down and up; and the ip address must remain the same.
+  The latter will possibly work with `wg syncconf`.
+* Only delete namespaces/interfaces and change the configuration with a partial down and up if necessary.
 
 ## Related projects
 
