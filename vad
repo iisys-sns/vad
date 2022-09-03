@@ -160,59 +160,6 @@ def run_or_fail(args, **kwargs):
     return process
 
 
-def execute_commands(config, section):
-    if not 'default' in config:
-        return
-    if not section in config['default']:
-        return
-    if not isinstance(config['default'][section], list):
-        return
-    log_verbose("Execute commands from the '%s' section:" % section)
-    for command in config['default'][section]:
-        run(['bash', '-c', command.replace('\\n', '\n')])
-
-
-def rebuild_up_command_from_config(config, parser_up):
-    default = config.get('default', {})
-    args = default.get('up_command', {})
-
-    cmdline = ['vad', 'up']
-
-    order = [
-        'update_server_list',
-        'dns',
-        'without_multihop'
-        'uniform_by_country',
-        'owned_entry',
-        'diskless_entry',
-        'COUNTRY_CITY_HOSTNAME',
-    ]
-
-    defaults_args = dict(vars(parser_up.parse_args([])))
-
-    for name in order:
-        if name not in args:
-            continue
-        value = args[name]
-        if name in defaults_args:
-            if defaults_args[name] == value:
-                continue
-        if name == 'COUNTRY_CITY_HOSTNAME':
-            cmdline.extend(value)
-        elif name == 'dns':
-            cmdline.append('--dns')
-            if isinstance(value, list):
-                cmdline.append(value[0])
-            else:
-                cmdline.append(value)
-        elif isinstance(value, bool):
-            cmdline.append('--%s' % name.replace('_', '-'))
-        else:
-            assert False
-
-    return subprocess.list2cmdline(cmdline)
-
-
 def device_move_to_physical(device):
     type, dev, phy = device
 
@@ -462,7 +409,7 @@ def request_logout(login):
     return response.status_code in [200,204]
 
 
-def load_config():
+def config_load():
     if not os.path.exists(CONFIGURATION):
         return False
 
@@ -474,16 +421,115 @@ def load_config():
     return config
 
 
-def save_config(config):
+def config_save(config):
     with open(CONFIGURATION, 'w') as c:
         yaml.dump(config, c)
     os.chmod(CONFIGURATION, 0o600)
+    return config
+
+
+def config_get_last_section(config, section_name):
+    return config.get('last_section', section_name)
+
+
+def config_save_last_section(config, section_name):
+    config['last_section'] = section_name
+    return config_save(config)
+
+
+def config_save_remove_last_section(config):
+    if 'last_section' in config:
+        del config['last_section']
+        return config_save(config)
+    return config
+
+
+def config_save_up_command(config, section_name, args):
+    section = config.get(section_name, {})
+    if not isinstance(section, dict):
+        config[section_name] = dict()
+
+    args_to_save = dict(vars(args))
+
+    del args_to_save['func']
+    del args_to_save['verbose']
+    del args_to_save['print_args']
+    del args_to_save['section']
+
+    del args_to_save['dry_run']
+    del args_to_save['dont_save']
+    del args_to_save['force']
+
+    config[section_name]['up_command'] = args_to_save
+    return config_save(config)
+
+
+def config_execute_commands(config, section_name, subsection_name):
+    section = config.get(section_name, {})
+    if not isinstance(section, dict):
+        return
+    subsection = section.get(subsection_name, [])
+    if not isinstance(subsection, list):
+        return
+    if subsection:
+        log_verbose("Execute commands from '%s.%s':" % (section_name, subsection_name))
+        for command in subsection:
+            run(['bash', '-c', command.replace('\\n', '\n')])
+
+
+def config_set_up_command_attributes(config, section_name, args):
+    section = config.get(section_name, {})
+    up_command = section.get('up_command', {})
+    for key, value in up_command.items():
+        setattr(args, key, value)
+
+
+def config_rebuild_up_command(config, section_name, parser_up):
+    section = config.get(section_name, {})
+    up_command = section.get('up_command', {})
+
+    cmdline = ['vad', 'up']
+
+    order = [
+        'update_server_list',
+        'dns',
+        'without_multihop'
+        'uniform_by_country',
+        'owned_entry',
+        'diskless_entry',
+        'only_use_ipv6',
+        'COUNTRY_CITY_HOSTNAME',
+    ]
+
+    defaults_args = dict(vars(parser_up.parse_args([])))
+
+    for name in order:
+        if name not in up_command:
+            continue
+        value = up_command[name]
+        if name in defaults_args:
+            if defaults_args[name] == value:
+                continue
+        if name == 'COUNTRY_CITY_HOSTNAME':
+            cmdline.extend(value)
+        elif name == 'dns':
+            cmdline.append('--dns')
+            if isinstance(value, list):
+                cmdline.append(value[0])
+            else:
+                cmdline.append(value)
+        elif isinstance(value, bool):
+            cmdline.append('--%s' % name.replace('_', '-'))
+        else:
+            assert False
+
+    return subprocess.list2cmdline(cmdline)
 
 
 def init_command(args):
     become_root()
 
-    config = load_config()
+    config = config_load()
 
     if isinstance(config, dict):
         if not 'devices' in config:
@@ -522,7 +568,7 @@ def init_command(args):
         else:
             config['account_number'] = account_number
 
-        save_config(config)
+        config = config_save(config)
 
         if len(config['devices']) == 1:
             log_info('First device added (you can now use `vad up`)')
@@ -531,11 +577,13 @@ def init_command(args):
     finally:
         request_logout(login)
 
+    return config
+
 
 def delete_command(args):
     become_root()
 
-    config = load_config()
+    config = config_load()
 
     index = int(args.INDEX[0])
     if index < len(config['devices']):
@@ -550,10 +598,12 @@ def delete_command(args):
         public_key = get_public_key(device['private_key'])
         request_revoke_key(login, public_key)
         config['devices'].remove(device)
-        save_config(config)
+        config = config_save(config)
         log_info("Deleted device %s (index %d)!" % (public_key, index))
     finally:
         request_logout(login)
+
+    return config
 
 
 def generate_private_key():
@@ -628,7 +678,7 @@ def print_peer_table(peers, this_peers, show_device_id):
 def info_command(args, parser_up):
     become_root()
 
-    config = load_config()
+    config = config_load()
     account_number = request_account_number(args.passname, config)
     login = request_login(account_number)
 
@@ -686,7 +736,10 @@ def info_command(args, parser_up):
             print_peer_table(account['wg_peers'], peers, args.show_device_ids)
             print()
             log_info('If you only call `vad up` this command will be executed: ', end='')
-            print(rebuild_up_command_from_config(config, parser_up))
+            print(config_rebuild_up_command(
+                config,
+                config_get_last_section(config, args.section[0]),
+                parser_up))
     except Exception as e:
         log_fatal('Error while tying to show account information (%s)!' % str(e))
     finally:
@@ -775,17 +828,18 @@ def setup_mullvad_wireguard_device(namespace_new, namespace_link_to, device_name
 def up_command(args, is_default):
     become_root()
 
-    config = load_config()
+    config = config_load()
     if not config or not isinstance(config, dict):
         log_fatal('No configuration file found or not readable (use `vad init` to create one)!')
 
     if is_default:
-        if 'default' in config and 'up_command' in config['default']:
-            for key, value in config['default']['up_command'].items():
-                setattr(args, key, value)
+        if args.force:
+            config_set_up_command_attributes(config, args.section[0], args)
+        else:
+            config_set_up_command_attributes(config, config_get_last_section(config, args.section[0]), args)
 
     if args.update_server_list:
-        update_command(None, True)
+        update_command(None)
 
     if len(config['devices']) == 0:
         log_fatal('No devices configured (use `vad init` to create a device)!')
@@ -863,14 +917,17 @@ def up_command(args, is_default):
 
     physical_already_existed = network_namespace_exists(NAMESPACE_PHYSICAL)
 
-    if not physical_already_existed:
-        execute_commands(config, 'pre_up')
-
     was_already_active = is_active()
+
+    if was_already_active and args.section[0] != 'default' and not args.force:
+        log_warn('Changing the configuration to "%s" on a active connection will be ignored unless you use `-f/--force`. But this will also execute all `pre_down` and `post_down` commands from the current configuration.' % args.section[0])
 
     if was_already_active:
         log_verbose("Was already active, do a partial tear down.")
-        down_command(Namespace(partial=True))
+        config = down_command(Namespace(section=args.section, partial=True, force=args.force))
+
+    if not physical_already_existed or args.force:
+        config_execute_commands(config, args.section[0], 'pre_up')
 
     log_info("Configure:", highlight=True)
     print(description)
@@ -949,25 +1006,15 @@ def up_command(args, is_default):
     update_resolvconf(get_dns_from_args(args))
 
     if not is_default and config and not args.dont_save:
-        if not 'default' in config:
-            config['default'] = dict()
-        if not isinstance(config['default'], dict):
-            config['default'] = dict()
+        config = config_save_up_command(config, config_get_last_section(config, args.section[0]), args)
 
-        args_to_save = dict(vars(args))
-        del args_to_save['func']
-        del args_to_save['verbose']
-        del args_to_save['print_args']
-        del args_to_save['dry_run']
-        del args_to_save['dont_save']
-        config['default']['up_command'] = args_to_save
-
-        save_config(config)
-
-    if not physical_already_existed:
-        execute_commands(config, 'post_up')
+    if not physical_already_existed or args.force:
+        config_execute_commands(config, config_get_last_section(config, args.section[0]), 'post_up')
+        config = config_save_last_section(config, args.section[0])
 
     log_success("VPN is successfully up!")
+
+    return config
 
 
 def network_namespace_exists(namespace):
@@ -1015,11 +1062,11 @@ def remove_file_if_exists(filename):
 def down_command(args):
     become_root()
 
-    config = load_config()
+    config = config_load()
 
-    if config and not args.partial:
-        execute_commands(config, 'pre_down')
-        config = load_config()
+    if (config and not args.partial) or args.force:
+        config_execute_commands(config, config_get_last_section(config, args.section[0]), 'pre_down')
+        config = config_load()
 
     remove_file_if_exists(DESCRIPTION)
     remove_file_if_exists(CONFIGURATION_HOP % 0)
@@ -1054,13 +1101,16 @@ def down_command(args):
                 device_name=interface_name,
             )
 
-    if config and not args.partial:
-        execute_commands(config, 'post_down')
+    if (config and not args.partial) or args.force:
+        config_execute_commands(config, config_get_last_section(config, args.section[0]), 'post_down')
+        config = config_save_remove_last_section(config)
 
     if args.partial:
         log_success("VPN is succefully down (partial)")
     else:
         log_success("VPN is succefully down")
+
+    return config
 
 
 def exec_command(args):
@@ -1192,21 +1242,21 @@ def reset_command(args):
 
     # TODO: remove services added through `vpn service`
 
-    config = load_config()
+    config = config_load()
     devices = config.get('devices', [])
     for device in devices:
-        delete_command(Namespace(INDEX=['0'], passname='web/mullvad'))
-
-    config = load_config()
+        config = delete_command(Namespace(INDEX=['0'], passname='web/mullvad'))
 
     down_command(Namespace(partial=False))
 
     if 'account_number' in config:
         del config['account_number']
 
-    save_config(config)
+    config = config_save(config)
 
     log_success("Successfully reseted")
+
+    return config
 
 
 def update_command(args):
@@ -1618,11 +1668,10 @@ def is_default_arguments(parser, subparser, args):
     defaults_parser = vars(parser.parse_args([]))
     defaults_subparser = vars(subparser.parse_args([]))
     defaults = {**defaults_parser, **defaults_subparser}
-    args_to_compare = dict(vars(args))
-    args_to_compare['verbose'] = False
-    args_to_compare['print_args'] = False
+    args_to_compare = {**vars(args), **defaults_parser}
     args_to_compare['dry_run'] = False
     args_to_compare['dont_save'] = False
+    args_to_compare['force'] = False
     return defaults == args_to_compare
 
 
@@ -1634,6 +1683,7 @@ def vad():
 
     parser.add_argument('-p', '--print-args', action='store_true', help='Output parsed args.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Output verbose information.')
+    parser.add_argument('-c', '--section', nargs=1, dest='section', help='Use differnt configuration section. A section contains `post_up`, `post_down`, `pre_up`, `pre_down` and saved `up_command`. This option will be ignored while the vpn is active. If you want to use this option on a partial up you need to use `vad up -f/--force`', default=['default'])
 
     subparsers = parser.add_subparsers()
     subparser_args = dict(
@@ -1663,6 +1713,7 @@ def vad():
 
     up = subparsers.add_parser('up', aliases=['u'], help=f'Set up a vpn tunnel: move all physical network devices into the physical network namespace, configure one or more mullvad server and setup a wireguard device in the root namespace. All programs from non root users are forced to use the wireguard device in the root namespace.')
     up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the server\'s hostname. The sequence determines the data flow. More hops require more devices (see `vad init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the european union then use "eu". If you only want to use hops from countries on the european continent then use "ex". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vad up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
+    up.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial up. This will allows also changing the configuration section with the `vad -c <section> up` argument.')
     up.add_argument('-s', '--dont-save', action='store_true', help='Do not save the last call with arguments to the configuration file.')
     up.add_argument('-a', '--update-server-list', action='store_true', help='Update server list.')
     up.add_argument('-n', '--dry-run', action='store_true', help='Show only chosen hop(s) and nameserver.')
@@ -1675,6 +1726,7 @@ def vad():
     up.set_defaults(func=up_command)
 
     down = subparsers.add_parser('down', aliases=['d'], help='Tear down the vpn configuration and restore the previous state.')
+    down.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial up. This will allows also changing the configuration section with the `vad -c <section> up` argument.')
     down.add_argument('-p', '--partial', action='store_true', help=f'Do not delete the physical namespace. Your physical network interfaces will remain in this namespace, which leaves with no network access at all. Useful if you manually configured your physical network namespace.', default=False)
     down.set_defaults(func=down_command)
 
@@ -1734,7 +1786,7 @@ def vad():
         else:
             args.func(args)
     except KeyboardInterrupt:
-        pass
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -178,7 +178,6 @@ $ # vpn down
 ## TODOs
 
 * [ ] Fix double configuration of `wpa_supplicant`
-* [ ] Add the possibility to use a specific configuration name besides "default";
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
 * [ ] Terminology is a bit confusing at the moment, e.g. we use "device" for linux interfaces and Mullvad devices.
