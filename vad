@@ -348,6 +348,62 @@ def request_login(account_number):
         log_fatal("Could not parse account information (%s)!" % (str(e)))
 
 
+def request_account(login):
+    try:
+        log_verbose('request account...', end='')
+        response = requests.get(
+            "https://api.mullvad.net/www/me",
+            headers=dict(
+                Authorization='Token %s' % login['auth_token']
+            ),
+        )
+        log_verbose('%s' % response.status_code)
+    except Exception as e:
+        log_fatal("Error while sending request to receive account information (%s)!" % (str(e)))
+    if response.status_code != 200:
+        log_fatal("Could not receive account information (%d:%s)!" % (response.status_code, response.text))
+    try:
+        return response.json()
+    except Exception as e:
+        log_fatal("Could not parse account information (%s)!" % (str(e)))
+
+
+def request_login_api(account_number, config):
+    auth = config.get('auth', None)
+    if auth:
+        expires = datetime.strptime(auth['api_expiry'], "%Y-%m-%dT%H:%M:%S+00:00")
+        if expires > datetime.now():
+            return config
+
+    try:
+        log_verbose('request login api...', end='')
+        response = requests.post(
+            'https://api.mullvad.net/auth/v1/token',
+            json=dict(
+                account_number=account_number
+            )
+        )
+        log_verbose('%s' % response.status_code)
+    except Exception as e:
+        log_fatal("Error while sending request to login into api (%s)!" % (str(e)))
+
+    if response.status_code != 200:
+        log_fatal("Could not login into api (%d:%s)!" % (response.status_code, response.text))
+
+    try:
+        # {'access_token': '...', 'expiry': 'YYYY-mm-ddTHH:MM:SS+00:00'}
+        app = response.json()
+    except Exception as e:
+        log_fatal("Could not parse api login response (%s)!" % (str(e)))
+
+    config['auth'] = dict(
+        api_token=app['access_token'],
+        api_expiry=app['expiry'],
+    )
+
+    return config_save(config)
+
+
 def request_add_key(login):
     log_verbose('request add key...', end='')
     private_key = generate_private_key()
@@ -368,12 +424,46 @@ def request_add_key(login):
     if response.status_code != 201:
         log_fatal("Could not add new public key to account (%d:%s)!" % (response.status_code, response.text))
     try:
-        peer = json.loads(response.text)
+        peer = response.json()
     except Exception as e:
         log_fatal("Adding new public key: Could not parse response (%s:%s)!" % (response.text, str(e)))
     if peer['key']['public'] != public_key:
         log_fatal("Adding new public key: Public key in response should be equal to sended public key, but is not (%s (response) != %s (sended))!" % (peer['key']['public'], public_key))
     return (private_key, peer)
+
+
+def request_update_public_key(config, device):
+    if not 'device_id' in device:
+        return
+
+    private_key = generate_private_key()
+    public_key = get_public_key(private_key)
+
+    try:
+        log_verbose('request update public key...', end='')
+        response = requests.put(
+            "https://api.mullvad.net/accounts/v1/devices/%s/pubkey" % device['device_id'],
+            headers=dict(
+                Authorization='Bearer %s' % config['auth']['api_token']
+            ),
+            json=dict(
+                pubkey=public_key
+            )
+        )
+        log_verbose('%s' % response.status_code)
+    except Exception as e:
+        log_fatal("Error while sending request to update public key for device %s (%s)!" % (device['device_id'], str(e)))
+    if response.status_code != 200:
+        log_fatal("Could not update public key to account (%d:%s)!" % (response.status_code, response.text))
+
+    try:
+        peer = response.json()
+    except Exception as e:
+        log_fatal("Update public key: Could not parse response (%s:%s)!" % (response.text, str(e)))
+    if peer['pubkey'] != public_key:
+        log_fatal("Update public key: Public key in response should be equal to sended public key, but is not (%s (response) != %s (sended))!" % (peer['pubkey'], public_key))
+
+    return private_key, peer
 
 
 def request_revoke_key(login, public_key):
@@ -422,6 +512,7 @@ def config_load():
 
 
 def config_save(config):
+    assert isinstance(config, dict)
     with open(CONFIGURATION, 'w') as c:
         yaml.dump(config, c)
     os.chmod(CONFIGURATION, 0o600)
@@ -556,11 +647,18 @@ def init_command(args):
 
         private_key, peer = request_add_key(login)
 
-        config['devices'].append(dict(
-            private_key=private_key,
-            ipv4=peer['ipv4_address'],
-            ipv6=peer['ipv6_address'],
-        ))
+        account = request_account(login)
+
+        for device in account['account']['wg_peers']:
+            if device['key']['public'] == peer['key']['public']:
+                config['devices'].append(dict(
+                    private_key=private_key,
+                    ipv4=peer['ipv4_address'],
+                    ipv6=peer['ipv6_address'],
+                    device_id=device['device_id'],
+                    device_name=device['device_name'],
+                ))
+                break
 
         if args.dont_save_account_number:
             if 'account_number' in config:
@@ -1237,6 +1335,26 @@ def list_command(args):
         print(table)
 
 
+def rotate_command(args, up_command_defaults):
+    become_root()
+
+    config = config_load()
+    account_number = request_account_number(args.passname, config)
+    config = request_login_api(account_number, config)
+
+    for device in config.get('devices', []):
+        private_key, peer = request_update_public_key(config, device)
+        device['private_key'] = private_key
+        device['ipv4'] = peer['ipv4_address']
+        device['ipv6'] = peer['ipv6_address']
+        device['device_id'] = peer['id']
+        device['device_name'] = peer['name']
+        config_save(config)
+
+    if is_active():
+        up_command(Namespace(**up_command_defaults), True)
+
+
 def reset_command(args):
     become_root()
 
@@ -1251,6 +1369,8 @@ def reset_command(args):
 
     if 'account_number' in config:
         del config['account_number']
+    if 'auth' in config:
+        del config['auth']
 
     config = config_save(config)
 
@@ -1664,10 +1784,16 @@ def test_command(args):
         unittest.main(argv=sys.argv[1:])
 
 
-def is_default_arguments(parser, subparser, args):
+def get_default_arguments(parser, subparser):
     defaults_parser = vars(parser.parse_args([]))
     defaults_subparser = vars(subparser.parse_args([]))
     defaults = {**defaults_parser, **defaults_subparser}
+    return defaults
+
+
+def is_default_arguments(parser, subparser, args):
+    defaults_parser = vars(parser.parse_args([]))
+    defaults = get_default_arguments(parser, subparser)
     args_to_compare = {**vars(args), **defaults_parser}
     args_to_compare['dry_run'] = False
     args_to_compare['dont_save'] = False
@@ -1758,6 +1884,10 @@ def vad():
     list.add_argument('-b', '--diskless', action='store_true', help='Filter by diskless boot servers (stboot [BETA]).', default=None)
     list.set_defaults(func=list_command)
 
+    rotate = subparsers.add_parser('rotate', help='Rotate WireGuard keys from all mapped devices')
+    rotate.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
+    rotate.set_defaults(func=rotate_command)
+
     reset = subparsers.add_parser('reset', help='Tear down vpn, delete all mapped devices to this computer, remove services added through `vpn service` and remove account related information from configuration')
     reset.set_defaults(func=reset_command)
 
@@ -1783,6 +1913,8 @@ def vad():
             args.func(args, up)
         elif args.func == up_command:
             args.func(args, is_default=is_default_arguments(parser, up, args))
+        elif args.func == rotate_command:
+            args.func(args, get_default_arguments(parser, up))
         else:
             args.func(args)
     except KeyboardInterrupt:

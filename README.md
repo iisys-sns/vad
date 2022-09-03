@@ -111,23 +111,23 @@ Show account information:
 $ vad info
 ```
 
-Rotate WireGuard keys for your first configured device:
+Rotate WireGuard keys for all mapped devices:
 
 ```sh
 $ vad down
-$ vad delete 0
-$ vad init
-($ vad rotate)
+$ vad info
+$ vad rotate
+$ vad info
+$ vad status
 ```
 
-Rotate WireGuard keys for your first configured device while the vpn is active:
+Rotate WireGuard keys for all mapped device while the vpn is active:
 
 ```sh
 $ vad up         # Remembers the configuration from `vad up de pl se` and builds a 3 hop tunnel
-$ vad delete 0
-$ vad init
-($ vad rotate)
-$ vad up
+$ vad info
+$ vad rotate     # If the vpn was active, rotate will automatically call `vpn up` to use the new keys
+$ vad info
 $ vad status
 ```
 
@@ -169,7 +169,7 @@ Reset:
 
 ```sh
 $ vad reset
-$ # Deletes account number from configuration file but is otherwise equivalent to:
+$ # Deletes the account number from configuration file but is otherwise equivalent to:
 $ # vpn delete 0 (repeated for every mapped device)
 $ # vpn service -r (TODO)
 $ # vpn down
@@ -270,8 +270,6 @@ $ # vpn down
   Add a `--volatile` flag to this command to automatically delete this port on down or partial down.
   Ports mapping may not survive a up/down or partial up/down, because the exit can change!
   If the port mappings already exist this command is a no-op.
-* [ ] Change API from wwww to Mullvad API (makes it possible to update wg keys, so devices don't need to be deleted and recreated).
-* [ ] Add `device_id` and `device_name` to configuration file
 * [ ] Add support for private/external WireGuard servers.
   A server is split into a "device" and a "server".
   A device has the following attributes: `private_key`, `ipv4` and `ipv6`.
