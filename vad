@@ -1365,7 +1365,7 @@ def reset_command(args):
     for device in devices:
         config = delete_command(Namespace(INDEX=['0'], passname='web/mullvad'))
 
-    down_command(Namespace(partial=False))
+    down_command(Namespace(partial=False, section=args.section, force=False))
 
     if 'account_number' in config:
         del config['account_number']
