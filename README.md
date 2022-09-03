@@ -191,6 +191,7 @@ $ # vad down
 
 ## TODOs
 
+* [ ] Test if dependencies are installed while launching
 * [ ] Execute `vad down` if `vad up` fails on the critical path
 * [ ] Fix double configuration of `wpa_supplicant`
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
