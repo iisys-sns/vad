@@ -144,10 +144,10 @@ $ vad info
 $ vad status
 ```
 
-Move your sshd into the physical namespace on `vpn up`:
+Move your sshd into the physical namespace on `vad up`:
 
 ```sh
-$ vpn down   # `post_up`, `post_down`, `pre_up` and `pre_down` will not be called for a partial down and up
+$ vad down   # `post_up`, `post_down`, `pre_up` and `pre_down` will not be called for a partial down and up
 $ # Add the following to your `/etc/mullavd/config.yaml`:
 [...]
 default:
@@ -160,13 +160,13 @@ default:
   - systemctl daemon-reload
   - systemctl restart sshd
 [...]
-$ vpn up
+$ vad up
 ```
 
-Sometimes NetworkManager interferes with the `/etc/resolv.conf` configuration, to disable it on `vpn up`:
+Sometimes NetworkManager interferes with the `/etc/resolv.conf` configuration, to disable it on `vad up`:
 
 ```sh
-$ vpn down
+$ vad down
 $ # Add the following to your `/etc/mullavd/config.yaml`:
 [...]
 default:
@@ -175,7 +175,7 @@ default:
   pre_up:
   - systemctl stop NetworkManager
 [...]
-$ vpn up
+$ vad up
 ```
 
 Reset:
@@ -183,13 +183,14 @@ Reset:
 ```sh
 $ vad reset
 $ # Deletes the account number from configuration file but is otherwise equivalent to:
-$ # vpn delete 0 (repeated for every mapped device)
-$ # vpn service -r (TODO)
-$ # vpn down
+$ # vad delete 0 (repeated for every mapped device)
+$ # vad service -r (TODO)
+$ # vad down
 ```
 
 ## TODOs
 
+* [ ] Execute `vad down` if `vad up` fails
 * [ ] Fix double configuration of `wpa_supplicant`
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
@@ -228,12 +229,12 @@ $ # vpn down
   [Install]
   WantedBy=timers.target
   ```
-  Automatically execute vpn up daily:
+  Automatically execute vad up daily:
   ```
   /usr/local/lib/system/vad.up.service
   ------------------------------------
   [Unit]
-  Description=Execute vpn up
+  Description=Execute vad up
 
   [Service]
   Type=oneshot
