@@ -45,13 +45,13 @@ The physical devices will stay inaccessible until an `vad down`.
 Arch Linux based:
 
 ```sh
-$ pacman -Syu --needed python-requests python-yaml python-prettytable python-numpy sudo iw wpa_supplicant dhcpcd openresolv wireguard-tools
+$ pacman -Syu --needed python-requests python-termcolor python-yaml python-prettytable python-numpy sudo iw wpa_supplicant dhcpcd openresolv wireguard-tools
 ```
 
 Debian based:
 
 ```sh
-$ apt install python3-requests python3-yaml python3-prettytable python3-numpy sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
+$ apt install python3-requests python3-termcolor python3-yaml python3-prettytable python3-numpy sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
 ```
 
 ## Untested
@@ -59,6 +59,19 @@ $ apt install python3-requests python3-yaml python3-prettytable python3-numpy su
 There could be problems with other configured WireGuard/VPN interfaces.
 
 ## Example
+
+If you have only a wlan device add the following configuration before use. This is an unkown issue.
+
+```sh
+ctrl_interface=/run/wpa_supplicant
+update_config=1
+
+network={
+	ssid="<YOUR SSID>"
+	psk="<YOUR PSK>"
+	mesh_fwding=1
+}
+```
 
 First use:
 
