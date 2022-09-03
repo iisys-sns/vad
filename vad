@@ -1371,6 +1371,8 @@ def rotate_command(args, up_command_defaults):
         device['device_name'] = peer['name']
         config_save(config)
 
+    log_success("Successfully rotated WireGuard keys of all mapped devices")
+
     if is_active():
         up_command(Namespace(**up_command_defaults), True)
 
@@ -1859,7 +1861,7 @@ def vad():
 
     up = subparsers.add_parser('up', aliases=['u'], help=f'Set up a vpn tunnel: move all physical network devices into the physical network namespace, configure one or more mullvad server and setup a wireguard device in the root namespace. All programs from non root users are forced to use the wireguard device in the root namespace.')
     up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the server\'s hostname. The sequence determines the data flow. More hops require more devices (see `vad init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the european union then use "eu". If you only want to use hops from countries on the european continent then use "ex". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vad up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
-    up.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial up. This will allows also changing the configuration section with the `vad -c <section> up` argument.')
+    up.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial up. This also allows changing the configuration section with the `vad -c <section> up` argument.')
     up.add_argument('-s', '--dont-save', action='store_true', help='Do not save the last call with arguments to the configuration file.')
     up.add_argument('-a', '--update-server-list', action='store_true', help='Update server list.')
     up.add_argument('-n', '--dry-run', action='store_true', help='Show only chosen hop(s) and nameserver.')
@@ -1872,8 +1874,8 @@ def vad():
     up.set_defaults(func=up_command)
 
     down = subparsers.add_parser('down', aliases=['d'], help='Tear down the vpn configuration and restore the previous state.')
-    down.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial up. This will allows also changing the configuration section with the `vad -c <section> up` argument.')
-    down.add_argument('-p', '--partial', action='store_true', help=f'Do not delete the physical namespace. Your physical network interfaces will remain in this namespace, which leaves with no network access at all. Useful if you manually configured your physical network namespace.', default=False)
+    down.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial down. This also allows changing the configuration section with the `vad -c <section> up` argument.')
+    down.add_argument('-p', '--partial', action='store_true', help=f'Do not delete the physical namespace. Your physical network interfaces will remain in this namespace, which leaves you with no network access at all. Useful if you manually configured your physical network namespace.', default=False)
     down.set_defaults(func=down_command)
 
     exec = subparsers.add_parser('exec', aliases=['e'], help='Execute command in the physical namespace. The command can use the physical network interfaces directly.')

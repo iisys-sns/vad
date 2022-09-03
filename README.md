@@ -5,7 +5,7 @@ It aims to be very user friendly.
 It is based on [this](https://www.wireguard.com/netns) script.
 Even if ten hops are supported, only three may be useful in terms of performance and privacy.
 Normally, most vpn users will use only one hop.
-If you use more than one hop, you may be more easily identified by a passive external attacker watching incoming and outgoing traffic, due to traffic correlation.
+If you use more than one hop, you may be more easily identified by a passive external attacker watching incoming and outgoing traffic of an intermediate hop, due to traffic correlation.
 
 With network namespaces all programs from users, except programs that run with root rights, are forced to use the vpn interface to connect to the Internet, without complex iptable rules.
 An so-called "kill switch" is already integrated.
@@ -46,13 +46,13 @@ The physical devices will stay inaccessible until an `vad down`.
 Arch Linux based:
 
 ```sh
-$ pacman -Syu --needed python-requests python-termcolor python-yaml python-prettytable python-numpy sudo iw wpa_supplicant dhcpcd openresolv wireguard-tools
+# pacman -Syu --needed python-requests python-termcolor python-yaml python-prettytable python-numpy sudo iw wpa_supplicant dhcpcd openresolv wireguard-tools
 ```
 
 Debian based:
 
 ```sh
-$ apt install python3-requests python3-termcolor python3-yaml python3-prettytable python3-numpy sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
+# apt install python3-requests python3-termcolor python3-yaml python3-prettytable python3-numpy sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
 ```
 
 ## Untested
@@ -61,9 +61,11 @@ There could be problems with other configured WireGuard/VPN interfaces.
 
 ## Example
 
-If you only have a wlan device add the following configuration before use. This is an unkown issue.
+If you are not connected via an ethernet cable and have only a wlan device add the following configuration file before use. This is a known issue.
 
-```sh
+```
+/etc/wpa_supplicant/wpa_supplicant.conf
+---------------------------------------
 ctrl_interface=/run/wpa_supplicant
 update_config=1
 
@@ -191,7 +193,8 @@ $ # vad down
 
 ## TODOs
 
-* [ ] Add documentation comments
+* [ ] Add some documentation comments
+* [ ] Test assumptions in `update_command` about unique country and city codes
 * [ ] Use typing hinting in conjunction with `mypy`
 * [ ] Implement a configuration class and api request class
 * [ ] Test if dependencies are installed while launching
@@ -200,7 +203,7 @@ $ # vad down
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
 * [ ] Terminology is a bit confusing at the moment, e.g. we use "device" for linux interfaces and Mullvad devices.
-* [ ] Add `vad move mv`, `vad service add` and `vad service rm`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates WireGuard keys every 4 days (same as the mullvad app).
+* [ ] Add `vad move/mv`, `vad service add` and `vad service rm`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates WireGuard keys every 4 days (same as the mullvad app).
   Look at [example](https://unix.stackexchange.com/questions/460028/automatically-move-physical-network-interfaces-to-namespace).
   Automatically move device to and create if not exists the physical namespace (Test with `udevadm test --action="add" <device>` and enable with `udevadm control --reload`):
   ```
@@ -276,7 +279,7 @@ $ # vad down
   [Install]
   WantedBy=multi-user.target
   ```
-  To enable `systemctl daemon-reload`, `systemctl enable vad.rotate.timer` and `systemctl enable vad`.
+  To enable execute: `systemctl daemon-reload`, `systemctl enable vad.rotate.timer` and `systemctl enable vad`.
 * [ ] Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible).
   ```sh
   $ vad port 22      # map one port from the exit server to the local port 22
