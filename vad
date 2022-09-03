@@ -519,18 +519,18 @@ def config_save(config):
     return config
 
 
-def config_get_last_section(config, section_name):
-    return config.get('last_section', section_name)
+def config_get_active_section(config, section_name):
+    return config.get('active_section', section_name)
 
 
-def config_save_last_section(config, section_name):
-    config['last_section'] = section_name
+def config_save_active_section(config, section_name):
+    config['active_section'] = section_name
     return config_save(config)
 
 
-def config_save_remove_last_section(config):
-    if 'last_section' in config:
-        del config['last_section']
+def config_save_remove_active_section(config):
+    if 'active_section' in config:
+        del config['active_section']
         return config_save(config)
     return config
 
@@ -538,6 +538,8 @@ def config_save_remove_last_section(config):
 def config_save_up_command(config, section_name, args):
     section = config.get(section_name, {})
     if not isinstance(section, dict):
+        config[section_name] = dict()
+    if not section_name in config:
         config[section_name] = dict()
 
     args_to_save = dict(vars(args))
@@ -836,7 +838,7 @@ def info_command(args, parser_up):
             log_info('If you only call `vad up` this command will be executed: ', end='')
             print(config_rebuild_up_command(
                 config,
-                config_get_last_section(config, args.section[0]),
+                config_get_active_section(config, args.section[0]),
                 parser_up))
     except Exception as e:
         log_fatal('Error while tying to show account information (%s)!' % str(e))
@@ -934,7 +936,7 @@ def up_command(args, is_default):
         if args.force:
             config_set_up_command_attributes(config, args.section[0], args)
         else:
-            config_set_up_command_attributes(config, config_get_last_section(config, args.section[0]), args)
+            config_set_up_command_attributes(config, config_get_active_section(config, args.section[0]), args)
 
     if args.update_server_list:
         update_command(None)
@@ -1018,7 +1020,7 @@ def up_command(args, is_default):
     was_already_active = is_active()
 
     if was_already_active and args.section[0] != 'default' and not args.force:
-        log_warn('Changing the configuration to "%s" on a active connection will be ignored unless you use `-f/--force`. But this will also execute all `pre_down` and `post_down` commands from the current configuration.' % args.section[0])
+        log_warn('Changing the configuration to "%s" on a active connection will be ignored unless you use `-f/--force`. But this will also executes all `pre_down` and `post_down` commands from the current configuration.' % args.section[0])
 
     if was_already_active:
         log_verbose("Was already active, do a partial tear down.")
@@ -1104,11 +1106,11 @@ def up_command(args, is_default):
     update_resolvconf(get_dns_from_args(args))
 
     if not is_default and config and not args.dont_save:
-        config = config_save_up_command(config, config_get_last_section(config, args.section[0]), args)
+        config = config_save_up_command(config, config_get_active_section(config, args.section[0]), args)
 
     if not physical_already_existed or args.force:
-        config_execute_commands(config, config_get_last_section(config, args.section[0]), 'post_up')
-        config = config_save_last_section(config, args.section[0])
+        config_execute_commands(config, config_get_active_section(config, args.section[0]), 'post_up')
+        config = config_save_active_section(config, args.section[0])
 
     log_success("VPN is successfully up!")
 
@@ -1163,7 +1165,7 @@ def down_command(args):
     config = config_load()
 
     if (config and not args.partial) or args.force:
-        config_execute_commands(config, config_get_last_section(config, args.section[0]), 'pre_down')
+        config_execute_commands(config, config_get_active_section(config, args.section[0]), 'pre_down')
         config = config_load()
 
     remove_file_if_exists(DESCRIPTION)
@@ -1200,8 +1202,8 @@ def down_command(args):
             )
 
     if (config and not args.partial) or args.force:
-        config_execute_commands(config, config_get_last_section(config, args.section[0]), 'post_down')
-        config = config_save_remove_last_section(config)
+        config_execute_commands(config, config_get_active_section(config, args.section[0]), 'post_down')
+        config = config_save_remove_active_section(config)
 
     if args.partial:
         log_success("VPN is succefully down (partial)")
