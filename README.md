@@ -36,6 +36,7 @@ The physical devices will stay inaccessible until an `vad down`.
 1. `sysctl`,
 1. `python-yaml`,
 1. `python-requests`,
+1. `python-termcolor`
 1. `python-prettytable` (for info and list command),
 1. `resolvconf`,
 1. `pass` (optionally).
@@ -60,7 +61,7 @@ There could be problems with other configured WireGuard/VPN interfaces.
 
 ## Example
 
-If you have only a wlan device add the following configuration before use. This is an unkown issue.
+If you only have a wlan device add the following configuration before use. This is an unkown issue.
 
 ```sh
 ctrl_interface=/run/wpa_supplicant
@@ -190,7 +191,7 @@ $ # vad down
 
 ## TODOs
 
-* [ ] Execute `vad down` if `vad up` fails
+* [ ] Execute `vad down` if `vad up` fails on the critical path
 * [ ] Fix double configuration of `wpa_supplicant`
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)

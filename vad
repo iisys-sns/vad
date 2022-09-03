@@ -870,8 +870,11 @@ def status_command(args):
         response = requests.get("https://am.i.mullvad.net/connected")
         if response.status_code == 200:
             log_good(response.text.strip())
+        else:
+            log_bad(response.text.strip())
     except:
         log_bad("Not able to determine if connected to VPN.")
+
 
 
 def describe_server(server):
@@ -1113,6 +1116,15 @@ def up_command(args, is_default):
         config = config_save_active_section(config, args.section[0])
 
     log_success("VPN is successfully up!")
+
+    try:
+        response = requests.get("https://am.i.mullvad.net/connected")
+        if response.status_code == 200:
+            log_good(response.text.strip())
+        else:
+            log_bad(response.text.strip())
+    except:
+        log_bad("Not able to determine if connected to VPN.")
 
     return config
 
