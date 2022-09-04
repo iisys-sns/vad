@@ -4,12 +4,12 @@ An alternative experimental command line interface (CLI) for Mullvad that is bas
 It aims to be very user friendly.
 It is based on [this](https://www.wireguard.com/netns) script.
 Even if ten hops are supported, only three may be useful in terms of performance and privacy.
-Normally, most vpn users will use only one hop.
+Normally, most VPN users will use only one hop.
 If you use more than one hop, you may be more easily identified by a passive external attacker watching incoming and outgoing traffic of an intermediate hop, due to traffic correlation.
 
-With network namespaces all programs from users, except programs that run with root rights, are forced to use the vpn interface to connect to the Internet, without complex iptable rules.
+With network namespaces all programs from users, except programs that run with root rights, are forced to use the VPN interface to connect to the Internet, without complex iptable rules.
 An so-called "kill switch" is already integrated.
-After an `vad up`, if the vpn does not work anymore, no traffic will go out of the normal interfaces.
+After an `vad up`, if the VPN does not work anymore, no traffic will go out of the normal interfaces.
 The hop configuration can also be rebuild without traffic leaks.
 The physical devices will stay inaccessible until an `vad down`.
 
@@ -137,12 +137,12 @@ $ vad info
 $ vad status
 ```
 
-Rotate WireGuard keys for all mapped device while the vpn is active:
+Rotate WireGuard keys for all mapped devices while the VPN is active:
 
 ```sh
 $ vad up         # Remembers the configuration from `vad up de pl se` and builds a 3 hop tunnel
 $ vad info
-$ vad rotate     # If the vpn was active, rotate will automatically call `vpn up` to use the new keys
+$ vad rotate     # If the VPN was active, rotate will automatically call `vad up` to use the new keys
 $ vad info
 $ vad status
 ```
@@ -154,13 +154,13 @@ $ vad down   # `post_up`, `post_down`, `pre_up` and `pre_down` will not be calle
 $ # Add the following to your `/etc/mullavd/config.yaml`:
 [...]
 default:
-  post_down:
-  - systemctl revert sshd
-  - systemctl restart sshd
   post_up:
   - mkdir -p /etc/systemd/system/sshd.service.d
   - echo -n "[Service]\nNetworkNamespacePath=/var/run/netns/physical" > /etc/systemd/system/sshd.service.d/override.conf
   - systemctl daemon-reload
+  - systemctl restart sshd
+  post_down:
+  - systemctl revert sshd
   - systemctl restart sshd
 [...]
 $ vad up
@@ -173,26 +173,72 @@ $ vad down
 $ # Add the following to your `/etc/mullavd/config.yaml`:
 [...]
 default:
-  post_down:
-  - systemctl start NetworkManager
   pre_up:
   - systemctl stop NetworkManager
+  post_down:
+  - systemctl start NetworkManager
 [...]
 $ vad up
+```
+
+You want to use other `*_up` and/or `*_down` commands; and a differnt hop configuration for work?
+
+```sh
+$ vad -c work up --dns atmpg eu    # Connect to a random server in the European Union and no adult content (p) for work :) See `vad up --help` for `--dns` flags.
+$ vad up                           # Connect to another random server in the European Union with the same nameserver.
+$ vad down                         # The "work" profile will stay active until `vad down`.
+$ vad up                           # Uses the "default" profile again.
+```
+
+Switch profile on the fly:
+
+```sh
+$ vad -c work up --force           # This will execute `pre_down` and `post_down` commands from "default", activates the "work" profile and executes `pre_up` and `post_up` commands from it.
+$ vad -c default up                # If you call it without `--force`, it will warn you that it ignores `-c default` and executes an up in the "work" profile.
+```
+
+Portforwarding and game servers (TODO Does not work at the moment but gives a preview how it could work):
+
+```sh
+$ vad port 8888           # Forwards a random port (e.g. 55055) from your current exit to the local port 8888.
+<exit-ip>:55055 -> 8888   # Normally you can not access this port with your exit ip address, but it will add nat rules with `iptables` so you can.
+                          # One port is allocated in your account, for your current exit device. This port 55055 will stay the same as long as it is not deleted.
+
+$ vad info
+$ vad down        # Will delete added nat rules.
+$ vad up          # Portforwardings do not survive a down and up, because the exit server could change.
+                  # But the port is still allocated in your account.
+
+$ vad list <country>      # Normally you want a game server close to the people who will use it.
+                          # And it should have a semi static ip address and a static port.
+                          # The ip address from your ISP will normally change daily.
+                          # This is a good alternative if you just want to start a server temporarly or from time to time
+                          # and do not want to deal with a changing address and ports.
+                          # Choice one hostname from the list. In our experience the ip address does not change (that often).
+$ vad <game> up <hostname>            # Use the hostname.
+$ vad port <game-server-port>         # This will allocate a differnt port from your account (e.g. 60606),
+<hostname-exit-ip>:60606 -> <game-server-port>
+                                      # if you do not have ports left it will ask you which port you want to delete from your mapped devices.
+                                      # Now you can edit the configuration and add `*_pre` and `*_post` commands so everythings starts automatically.
+                                      # At least you need to add `vad port <game-server-port>` in `post_up`.
+$ vad down                            # Not running
+# vad <game> up                       # Running game server. Have fun :)
 ```
 
 Reset:
 
 ```sh
 $ vad reset
-$ # Deletes the account number from configuration file but is otherwise equivalent to:
+$ # Corresponds to the following commands, but additonally deletes account-related information from the configuration file.
 $ # vad delete 0 (repeated for every mapped device)
-$ # vad service -r (TODO)
+$ # vad service rm (TODO)
 $ # vad down
 ```
 
 ## TODOs
 
+* [ ] Rename `active_section` and `section` to `active_profile` and `profile`
+* [ ] Remove `-c` for profiles: `vad -c work up` to `vad work up`.
 * [ ] Add some documentation comments
 * [ ] Test assumptions in `update_command` about unique country and city codes
 * [ ] Use typing hinting in conjunction with `mypy`
@@ -203,7 +249,7 @@ $ # vad down
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
 * [ ] Terminology is a bit confusing at the moment, e.g. we use "device" for linux interfaces and Mullvad devices.
-* [ ] Add `vad move/mv`, `vad service add` and `vad service rm`, which automatically starts the vpn on system startup, creates the physical namespace, move new network devices into physical namespace and rotates WireGuard keys every 4 days (same as the mullvad app).
+* [ ] Add `vad move/mv`, `vad service add` and `vad service rm`, which automatically starts the VPN on system startup, creates the physical namespace, move new network devices into physical namespace and rotates WireGuard keys every 4 days (same as the mullvad app).
   Look at [example](https://unix.stackexchange.com/questions/460028/automatically-move-physical-network-interfaces-to-namespace).
   Automatically move device to and create if not exists the physical namespace (Test with `udevadm test --action="add" <device>` and enable with `udevadm control --reload`):
   ```
