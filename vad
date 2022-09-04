@@ -150,6 +150,11 @@ def print_command(process):
 
 
 def run(args, failure_ok=False, **kwargs):
+    if VERBOSE:
+        command = subprocess.list2cmdline(args)
+        command = command.replace('\n','\\n')
+        log_info('= ' + command + '\r', end='')
+
     process = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kwargs)
 
     if VERBOSE:
