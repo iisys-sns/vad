@@ -215,14 +215,14 @@ $ vad list <country>      # Normally you want a game server close to the people 
                           # This is a good alternative if you just want to start a server temporarly or from time to time
                           # and do not want to deal with a changing address and ports.
                           # Choice one hostname from the list. In our experience the ip address does not change (that often).
-$ vad <game> up <hostname>            # Use the hostname.
+$ vad -c <game> up <hostname>         # Use the hostname.
 $ vad port <game-server-port>         # This will allocate a differnt port from your account (e.g. 60606),
 <hostname-exit-ip>:60606 -> <game-server-port>
                                       # if you do not have ports left it will ask you which port you want to delete from your mapped devices.
                                       # Now you can edit the configuration and add `*_pre` and `*_post` commands so everythings starts automatically.
                                       # At least you need to add `vad port <game-server-port>` in `post_up`.
 $ vad down                            # Not running
-# vad <game> up                       # Running game server. Have fun :)
+# vad -c <game> up                    # Running game server. Have fun :)
 ```
 
 Reset:
@@ -238,7 +238,6 @@ $ # vad down
 ## TODOs
 
 * [ ] Rename `active_section` and `section` to `active_profile` and `profile`
-* [ ] Remove `-c` for profiles: `vad -c work up` to `vad work up`.
 * [ ] Add some documentation comments
 * [ ] Test assumptions in `update_command` about unique country and city codes
 * [ ] Use typing hinting in conjunction with `mypy`
