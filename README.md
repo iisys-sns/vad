@@ -2,7 +2,7 @@
 
 An alternative experimental command line interface (CLI) for Mullvad that is based on network namespaces and supports up to ten hops.
 It aims to be very user friendly.
-It is based on [this](https://www.wireguard.com/netns) script.
+It is based on [this](https://www.wireguard.com/netns#sample-script) script.
 Even if ten hops are supported, only three may be useful in terms of performance and privacy.
 Normally, most VPN users will use only one hop.
 If you use more than one hop, you may be more easily identified by a passive external attacker watching incoming and outgoing traffic of an intermediate hop, due to traffic correlation.
