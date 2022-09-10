@@ -28,6 +28,7 @@ The physical devices will stay inaccessible until an `vad down`.
 
 1. `sudo`,
 1. `kill`, `killall`
+1. `timeout`,
 1. `wg`,
 1. `ip`,
 1. `iw` (for wifi),
@@ -36,7 +37,7 @@ The physical devices will stay inaccessible until an `vad down`.
 1. `sysctl`,
 1. `python-yaml`,
 1. `python-requests`,
-1. `python-termcolor`
+1. `python-termcolor`,
 1. `python-prettytable` (for info and list command),
 1. `resolvconf`,
 1. `pass` (optionally).
@@ -45,13 +46,13 @@ The physical devices will stay inaccessible until an `vad down`.
 
 Arch Linux based:
 
-```sh
+```
 # pacman -Syu --needed python-requests python-termcolor python-yaml python-prettytable python-numpy sudo iw wpa_supplicant dhcpcd openresolv wireguard-tools
 ```
 
 Debian based:
 
-```sh
+```
 # apt install python3-requests python3-termcolor python3-yaml python3-prettytable python3-numpy sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
 ```
 
@@ -72,9 +73,10 @@ update_config=1
 network={
 	ssid="<YOUR SSID>"
 	psk="<YOUR PSK>"
-	mesh_fwding=1
 }
 ```
+
+If you have any problems, use `vad down` it will (usually) rollback all changes from `vad up`.
 
 First use:
 
@@ -187,7 +189,7 @@ You want to use other `*_up` and/or `*_down` commands; and a differnt hop config
 $ vad -c work up --dns atmpg eu    # Connect to a random server in the European Union and no adult content (p) for work :) See `vad up --help` for `--dns` flags.
 $ vad up                           # Connect to another random server in the European Union with the same nameserver.
 $ vad down                         # The "work" profile will stay active until `vad down`.
-$ vad up                           # Uses the "default" profile again.
+$ vad up                           # Will use the "default" profile again.
 ```
 
 Switch profile on the fly:
@@ -230,101 +232,25 @@ Reset:
 ```sh
 $ vad reset
 $ # Corresponds to the following commands, but additonally deletes account-related information from the configuration file.
-$ # vad delete 0 (repeated for every mapped device)
+$ # vad delete --all
 $ # vad service rm (TODO)
 $ # vad down
 ```
 
 ## TODOs
 
-* [ ] Rename `active_section` and `section` to `active_profile` and `profile`
+* [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until it down.
+* [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
 * [ ] Test assumptions in `update_command` about unique country and city codes
-* [ ] Use typing hinting in conjunction with `mypy`
+* [ ] Use type hinting in conjunction with `mypy`
 * [ ] Implement a configuration class and api request class
 * [ ] Test if dependencies are installed while launching
 * [ ] Execute `vad down` if `vad up` fails on the critical path
-* [ ] Fix double configuration of `wpa_supplicant`
+* [ ] Fix double configuration due to `wpa_supplicant`
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
 * [ ] Terminology is a bit confusing at the moment, e.g. we use "device" for linux interfaces and Mullvad devices.
-* [ ] Add `vad move/mv`, `vad service add` and `vad service rm`, which automatically starts the VPN on system startup, creates the physical namespace, move new network devices into physical namespace and rotates WireGuard keys every 4 days (same as the mullvad app).
-  Look at [example](https://unix.stackexchange.com/questions/460028/automatically-move-physical-network-interfaces-to-namespace).
-  Automatically move device to and create if not exists the physical namespace (Test with `udevadm test --action="add" <device>` and enable with `udevadm control --reload`):
-  ```
-  /etc/udev/rules.d/vad.rules
-  ---------------------------
-  SUBSYSTEM=="net", ACTION=="add", DEVPATH!="/devices/virtual/*", RUN+="vad mv"
-  ```
-  Automatically execute key rotation every 4 days:
-  ```
-  /usr/local/lib/system/vad.rotate.service
-  ----------------------------------------
-  [Unit]
-  Description=Rotate WireGuard keys of all devices
-
-  [Service]
-  Type=oneshot
-  ExecStart=vad rotate
-  ```
-  `OnCalendar` of the timer is testable with: `systemd-analyze calendar --iterations=8 '*-*-2/4'`.
-  List timers: `systemctl list-timers --all`.
-  ```
-  /usr/local/lib/systemd/vad.rotate.timer
-  ---------------------------------------
-  [Unit]
-  Description=Rotate WireGuard keys of all devices every 4 days
-
-  [Timer]
-  OnCalendar=*-*-2/4
-  Persistent=true
-
-  [Install]
-  WantedBy=timers.target
-  ```
-  Automatically execute vad up daily:
-  ```
-  /usr/local/lib/system/vad.up.service
-  ------------------------------------
-  [Unit]
-  Description=Execute vad up
-
-  [Service]
-  Type=oneshot
-  ExecStart=vad up
-  ```
-  ```
-  /usr/local/lib/systemd/vad.up.timer
-  -----------------------------------
-  [Unit]
-  Description=Execute vad up daily to connect to other servers
-
-  [Timer]
-  OnCalendar=daily
-  Persistent=true
-
-  [Install]
-  WantedBy=timers.target
-  ```
-  Automatically start vad on system startup:
-  ```
-  /usr/local/lib/systemd/vad.service
-  ----------------------------------
-  [Unit]
-  Description=Starts VPN on system startup
-  After=syslog.target network.target
-  Wants=network.target
-
-  [Service]
-  Type=oneshot
-  RemainAfterExit=yes
-  ExecSearchPath=/usr/local/bin:/usr/bin
-  ExecStart=vad up
-
-  [Install]
-  WantedBy=multi-user.target
-  ```
-  To enable execute: `systemctl daemon-reload`, `systemctl enable vad.rotate.timer` and `systemctl enable vad`.
 * [ ] Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible).
   ```sh
   $ vad port 22      # map one port from the exit server to the local port 22
@@ -376,3 +302,5 @@ $ # vad down
 * <https://github.com/nurupo/pia-wg-netns-vpn>
 * <https://github.com/amonakov/vpn-netns>
 * <https://github.com/pekman/openvpn-netns>
+* <https://github.com/phvr/mullvad-wg/blob/master/mullvad>
+* <https://mullvad.net/media/files/mullvad-wg.sh>

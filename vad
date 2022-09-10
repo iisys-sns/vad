@@ -153,7 +153,8 @@ def run(args, failure_ok=False, **kwargs):
     if VERBOSE:
         command = subprocess.list2cmdline(args)
         command = command.replace('\n','\\n')
-        log_info('= ' + command + '\r', end='')
+        if sys.stdout.isatty() and sys.stderr.isatty():
+            log_info('= ' + command + '\r', end='')
 
     process = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kwargs)
 
@@ -531,67 +532,68 @@ def config_save(config):
     return config
 
 
-def config_get_active_section(config, section_name):
-    return config.get('active_section', section_name)
+def config_get_active_profile(config, profile_name):
+    return config.get('active_profile', profile_name)
 
 
-def config_save_active_section(config, section_name):
-    config['active_section'] = section_name
+def config_save_profile_section(config, profile_name):
+    config['active_profile'] = profile_name
     return config_save(config)
 
 
-def config_save_remove_active_section(config):
-    if 'active_section' in config:
-        del config['active_section']
+def config_save_remove_profile_section(config):
+    if 'active_profile' in config:
+        del config['active_profile']
         return config_save(config)
     return config
 
 
-def config_save_up_command(config, section_name, args):
-    section = config.get(section_name, {})
-    if not isinstance(section, dict):
-        config[section_name] = dict()
-    if not section_name in config:
-        config[section_name] = dict()
+def config_save_up_command(config, profile_name, args):
+    profile = config.get(profile_name, {})
+    if not isinstance(profile, dict):
+        config[profile_name] = dict()
+    if not profile_name in config:
+        config[profile_name] = dict()
 
     args_to_save = dict(vars(args))
 
     del args_to_save['func']
     del args_to_save['verbose']
     del args_to_save['print_args']
-    del args_to_save['section']
+    del args_to_save['profile']
+    del args_to_save['no_color']
 
     del args_to_save['dry_run']
     del args_to_save['dont_save']
     del args_to_save['force']
 
-    config[section_name]['up_command'] = args_to_save
+    config[profile_name]['up_command'] = args_to_save
     return config_save(config)
 
 
-def config_execute_commands(config, section_name, subsection_name):
-    section = config.get(section_name, {})
-    if not isinstance(section, dict):
+def config_execute_commands(config, profile_name, subsection_name):
+    profile = config.get(profile_name, {})
+    if not isinstance(profile, dict):
         return
-    subsection = section.get(subsection_name, [])
+    subsection = profile.get(subsection_name, [])
     if not isinstance(subsection, list):
         return
     if subsection:
-        log_verbose("Execute commands from '%s.%s':" % (section_name, subsection_name))
+        log_verbose("Execute commands from '%s.%s':" % (profile_name, subsection_name))
         for command in subsection:
             run(['bash', '-c', command.replace('\\n', '\n')])
 
 
-def config_set_up_command_attributes(config, section_name, args):
-    section = config.get(section_name, {})
-    up_command = section.get('up_command', {})
+def config_set_up_command_attributes(config, profile_name, args):
+    profile = config.get(profile_name, {})
+    up_command = profile.get('up_command', {})
     for key, value in up_command.items():
         setattr(args, key, value)
 
 
-def config_rebuild_up_command(config, section_name, parser_up):
-    section = config.get(section_name, {})
-    up_command = section.get('up_command', {})
+def config_rebuild_up_command(config, profile_name, parser_up):
+    profile = config.get(profile_name, {})
+    up_command = profile.get('up_command', {})
 
     cmdline = ['vad', 'up']
 
@@ -697,21 +699,30 @@ def delete_command(args):
 
     config = config_load()
 
-    index = int(args.INDEX[0])
-    if index < len(config['devices']):
-        device = config['devices'][index]
+    if not args.all and args.INDEX is None:
+        log_warn('Specify a INDEX or use `--all`')
+        exit(1)
+    elif args.all:
+        devices = config['devices']
     else:
-        log_warn('Device with index %d does not exists!' % index)
+        index = int(args.INDEX[0])
+        if index < len(config['devices']):
+            device = config['devices'][index]
+            devices = [device]
+        else:
+            log_warn('Device with index %d does not exists!' % index)
+            return
 
     account_number = request_account_number(args.passname, config)
     login = request_login(account_number)
 
     try:
-        public_key = get_public_key(device['private_key'])
-        request_revoke_key(login, public_key)
-        config['devices'].remove(device)
+        for device in devices:
+            public_key = get_public_key(device['private_key'])
+            request_revoke_key(login, public_key)
+            config['devices'].remove(device)
+            log_info("Deleted device %s (index %d)!" % (public_key, index))
         config = config_save(config)
-        log_info("Deleted device %s (index %d)!" % (public_key, index))
     finally:
         request_logout(login)
 
@@ -851,7 +862,7 @@ def info_command(args, parser_up):
             log_info('If you only call `vad up` this command will be executed: ', end='')
             print(config_rebuild_up_command(
                 config,
-                config_get_active_section(config, args.section[0]),
+                config_get_active_profile(config, args.profile[0]),
                 parser_up))
     except Exception as e:
         log_fatal('Error while trying to show account information (%s)!' % str(e))
@@ -878,9 +889,12 @@ def status_command(args):
         except Exception as e:
             log_warn("VPN seemed to be active but something went wrong (%s)" % str(e))
         print()
+    else:
+        log_bad("You are not connected to Mullvad.")
+        exit(1)
 
-    print_status_connected()
-
+    if not print_status_connected():
+        exit(1)
 
 
 def describe_server(server):
@@ -939,12 +953,16 @@ def print_status_connected():
         response = requests.get("https://am.i.mullvad.net/connected")
         if 'You are not' in response.text:
             log_bad(response.text.strip())
+            return False
         elif response.ok:
             log_good(response.text.strip())
+            return True
         else:
             log_bad(response.text.strip())
+            return False
     except:
         log_bad("Not able to determine if connected to VPN.")
+        return False
 
 
 def up_command(args, is_default):
@@ -956,9 +974,9 @@ def up_command(args, is_default):
 
     if is_default:
         if args.force:
-            config_set_up_command_attributes(config, args.section[0], args)
+            config_set_up_command_attributes(config, args.profile[0], args)
         else:
-            config_set_up_command_attributes(config, config_get_active_section(config, args.section[0]), args)
+            config_set_up_command_attributes(config, config_get_active_profile(config, args.profile[0]), args)
 
     if args.update_server_list:
         update_command(None)
@@ -986,9 +1004,9 @@ def up_command(args, is_default):
         server_random_choice(
             filter_servers(
                 active=True,
-                owned=args.owned_entry,
+                owned=args.owned_entry if args.owned_entry else None,
                 country_city_hostname=args.COUNTRY_CITY_HOSTNAME[0],
-                diskless=args.diskless_entry,
+                diskless=args.diskless_entry if args.diskless_entry else None,
             ),
             uniform_by_country=args.uniform_by_country
         )
@@ -1041,15 +1059,15 @@ def up_command(args, is_default):
 
     was_already_active = is_active()
 
-    if was_already_active and args.section[0] != 'default' and not args.force:
-        log_warn('Changing the configuration to "%s" on a active connection will be ignored unless you use `-f/--force`. But this will also executes all `pre_down` and `post_down` commands from the current configuration.' % args.section[0])
+    if was_already_active and args.profile[0] != config_get_active_profile(config, 'default') and not args.force:
+        log_warn('Changing the configuration to "%s" on an active connection will be ignored unless you use `-f/--force`. But this will also execute all `pre_down` and `post_down` commands from the current configuration.' % args.profile[0])
 
     if was_already_active:
         log_verbose("Was already active, do a partial tear down.")
-        config = down_command(Namespace(section=args.section, partial=True, force=args.force))
+        config = down_command(Namespace(profile=args.profile, partial=True, force=args.force))
 
     if not physical_already_existed or args.force:
-        config_execute_commands(config, args.section[0], 'pre_up')
+        config_execute_commands(config, args.profile[0], 'pre_up')
 
     log_info("Configure:", highlight=True)
     print(description)
@@ -1116,7 +1134,7 @@ def up_command(args, is_default):
         )
 
     if not physical_already_existed:
-        run(["killall", "-w", "wpa_supplicant", "dhcpcd"], failure_ok=True)
+        run(["timeout", "-s", "KILL", "5", "killall", "-w", "wpa_supplicant", "dhcpcd"], failure_ok=True)
         run(["mkdir", "-p", "/etc/netns/physical"])
         run(["rm", "-f", "/etc/netns/physical/resolv.conf"])
         run(["touch", "/etc/netns/physical/resolv.conf"])
@@ -1128,12 +1146,13 @@ def up_command(args, is_default):
     update_resolvconf(get_dns_from_args(args))
 
     if not is_default and config and not args.dont_save:
-        config = config_save_up_command(config, config_get_active_section(config, args.section[0]), args)
+        config = config_save_up_command(config, config_get_active_profile(config, args.profile[0]), args)
 
     if not physical_already_existed or args.force:
-        config_execute_commands(config, config_get_active_section(config, args.section[0]), 'post_up')
-        config = config_save_active_section(config, args.section[0])
+        config_execute_commands(config, config_get_active_profile(config, args.profile[0]), 'post_up')
+        config = config_save_profile_section(config, args.profile[0])
 
+    run(['systemctl', 'unmask', 'vad.move@.service'])
     log_success("VPN is successfully up!")
 
     print_status_connected()
@@ -1186,11 +1205,12 @@ def remove_file_if_exists(filename):
 def down_command(args):
     become_root()
 
+    run(['systemctl', 'mask', 'vad.move@.service'])
+
     config = config_load()
 
-    if (config and not args.partial) or args.force:
-        config_execute_commands(config, config_get_active_section(config, args.section[0]), 'pre_down')
-        config = config_load()
+    if config and (not args.partial or args.force):
+        config_execute_commands(config, config_get_active_profile(config, args.profile[0]), 'pre_down')
 
     remove_file_if_exists(DESCRIPTION)
     remove_file_if_exists(CONFIGURATION_HOP % 0)
@@ -1226,8 +1246,8 @@ def down_command(args):
             )
 
     if (config and not args.partial) or args.force:
-        config_execute_commands(config, config_get_active_section(config, args.section[0]), 'post_down')
-        config = config_save_remove_active_section(config)
+        config_execute_commands(config, config_get_active_profile(config, args.profile[0]), 'post_down')
+        config = config_save_remove_profile_section(config)
 
     if args.partial:
         log_success("VPN is succefully down (partial)")
@@ -1361,6 +1381,190 @@ def list_command(args):
         print(table)
 
 
+def service_config():
+    # SUBSYSTEM=="net", ACTION=="add", DEVPATH!="/devices/virtual/*", TAG+="systemd", ENV{SYSTEMD_WANTS}="vad.move@%E{INTERFACE}"
+    udev_rule = """
+    SUBSYSTEM=="net", ACTION=="add", DEVPATH!="/devices/virtual/*", RUN+="/bin/systemctl start vad.move@%E{ID_NET_NAME}"
+    """
+
+    vad_move_service = """
+    [Unit]
+    Description=Move interface to physical namespace
+
+    [Service]
+    Type=forking
+    ExecStart=vad -nv mv %I
+    """
+
+    vad_rotate_service = """
+    [Unit]
+    Description=Rotate WireGuard keys of all devices
+
+    [Service]
+    Type=oneshot
+    ExecStart=vad -nv rotate
+    """
+
+    vad_rotate_timer = """
+    [Unit]
+    After=network-online.target
+    Description=Rotate WireGuard keys of all devices every 4 days
+
+    [Timer]
+    OnCalendar=*-*-2/4 02:00
+    Persistent=true
+
+    [Install]
+    WantedBy=timers.target
+    """
+
+    vad_up_service = """
+    [Unit]
+    Description=Execute vad up
+
+    [Service]
+    Type=oneshot
+    ExecStartPre=vad -nv status
+    ExecStart=vad -nv up
+    """
+
+    vad_up_timer = """
+    [Unit]
+    After=network-online.target
+    Description=Execute vad up daily at 03:00 to refresh hop endpoints
+
+    [Timer]
+    OnCalendar=*-*-* 03:00
+    Persistent=true
+
+    [Install]
+    WantedBy=timers.target
+    """
+
+    vad_service = """
+    [Unit]
+    Description=Starts Vad on system startup
+    After=syslog.target network-online.target
+    Wants=network-online.target
+
+    [Service]
+    Type=forking
+    RemainAfterExit=yes
+    ExecStart=vad -nv up
+    ExecStop=vad -nv down
+
+    [Install]
+    WantedBy=multi-user.target
+    """
+
+    prefix='/usr/local'
+    bin_prefix=f"{prefix}/bin"
+    rule_prefix=f"{prefix}/lib/udev/rules.d"
+    systemd_prefix=f"{prefix}/lib/systemd/system"
+
+    return Namespace(
+        prefix=prefix,
+        bin_prefix=bin_prefix,
+        bin_path=f"{bin_prefix}/vad",
+        rule_prefix=rule_prefix,
+        rule_path=f"{rule_prefix}/vad.rules",
+        systemd_prefix=systemd_prefix,
+        udev_rule=udev_rule,
+        systemd_units=[
+            ("service" , f"{systemd_prefix}/vad.move@.service"  , vad_move_service   ) ,
+            ("service" , f"{systemd_prefix}/vad.rotate.service" , vad_rotate_service ) ,
+            ("service" , f"{systemd_prefix}/vad.up.service"     , vad_up_service     ) ,
+            ("service" , f"{systemd_prefix}/vad.service"        , vad_service        ) ,
+            ("timer"   , f"{systemd_prefix}/vad.rotate.timer"   , vad_rotate_timer   ) ,
+            ("timer"   , f"{systemd_prefix}/vad.up.timer"       , vad_up_timer       ) ,
+        ],
+    )
+
+
+def service_install_command(args):
+    become_root()
+
+    config = service_config()
+
+    os.makedirs(config.bin_prefix, exist_ok=True)
+    os.makedirs(config.rule_prefix, exist_ok=True)
+    os.makedirs(config.systemd_prefix, exist_ok=True)
+
+    log_verbose("Copy vad into %s" % config.bin_prefix)
+    shutil.copyfile(os.path.abspath(os.sys.argv[0]), config.bin_path)
+    os.chmod(config.bin_path, 0o755)
+
+    log_verbose("Install udev rule %s" % config.rule_path)
+
+    with open(config.rule_path, 'w') as f:
+        f.write(config.udev_rule)
+
+    for type, filename, content in config.systemd_units:
+        log_verbose("Install %s %s" % (type, filename))
+        with open(filename, 'w') as f:
+            f.write(content)
+
+    log_verbose("Verify configuration files:")
+
+    for filename in os.listdir('/sys/class/net'):
+        run_or_fail(['bash', '-c', 'udevadm test --action=add /sys/class/net/%s 2>&1 | grep "vad"' % filename])
+
+    for type, filename, content in config.systemd_units:
+        run_or_fail(['systemd-analyze', 'verify', os.path.basename(filename)])
+
+    log_verbose("Enable:")
+
+    for type, filename, content in config.systemd_units:
+        if 'vad.rotate.service' in filename:
+            continue
+        if 'vad.up.service' in filename:
+            continue
+        if 'vad.move@.service' in filename:
+            continue
+        run_or_fail(['systemctl', 'enable', os.path.basename(filename)])
+
+    log_verbose("Reload udev rules")
+    run_or_fail(['udevadm', 'control', '--reload'])
+
+    log_success("Successfully installed udev rule, services and timers!")
+
+
+def service_remove_command(args):
+    become_root()
+
+    config = service_config()
+
+    log_verbose("Disable services/timers:")
+    for type, filename, content in config.systemd_units:
+        run_or_fail(['systemctl', 'disable', os.path.basename(filename)])
+
+    log_verbose("Unlink %s" % config.bin_path)
+    os.unlink(config.bin_path)
+
+    log_verbose("Remove udev rule %s" % config.rule_path)
+    os.unlink(config.rule_path)
+
+    for type, filename, content in config.systemd_units:
+        log_verbose("Remove %s %s" % (type, filename))
+        os.unlink(filename)
+
+    log_verbose("Reload udev rules")
+    run_or_fail(['udevadm', 'control', '--reload'])
+
+
+def move_command(args):
+    become_root()
+
+    if not network_namespace_exists(NAMESPACE_PHYSICAL):
+        run_or_fail(["ip", "netns", "add", NAMESPACE_PHYSICAL])
+        run_or_fail(["ip", "-n", NAMESPACE_PHYSICAL, "link", "set", "lo", "up"])
+        run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "sysctl", 'net.ipv4.ping_group_range=0 2147483647'])
+
+    for device in get_network_devices():
+        if device[0] != DeviceType.Virtual and device[1] == args.INTERFACE[0]:
+            device_move_to_physical(device)
+
+
 def rotate_command(args, up_command_defaults):
     become_root()
 
@@ -1382,18 +1586,17 @@ def rotate_command(args, up_command_defaults):
     if is_active():
         up_command(Namespace(**up_command_defaults), True)
 
+    return config
+
 
 def reset_command(args):
     become_root()
 
-    # TODO: remove services added through `vpn service`
+    service_remove_command(Namespace())
 
-    config = config_load()
-    devices = config.get('devices', [])
-    for device in devices:
-        config = delete_command(Namespace(INDEX=['0'], passname='web/mullvad'))
+    config = delete_command(Namespace(all=True, INDEX=None, passname='web/mullvad'))
 
-    down_command(Namespace(partial=False, section=args.section, force=False))
+    down_command(Namespace(partial=False, profile=args.profile, force=False))
 
     if 'account_number' in config:
         del config['account_number']
@@ -1432,7 +1635,6 @@ def update_command(args):
 def get_network_devices():
     dir = '/sys/class/net'
     devices = []
-    # with NetworkNamespace(nsname=namespace):
     for dev in os.listdir(dir):
         path_dest = os.readlink(os.path.join(dir, dev))
         if 'virtual' in path_dest:
@@ -1458,6 +1660,7 @@ def get_network_devices_from_namespace(namespace):
         return devices
 
 
+# TODO: remove
 def dev_command(args):
     become_root(do_lock=False)
 
@@ -1481,6 +1684,7 @@ class TestDependencies(unittest.TestCase):
             "sudo",
             "kill",
             "killall",
+            "timeout",
             "wg",
             "ip",
             "iw",
@@ -1837,7 +2041,9 @@ def vad():
 
     parser.add_argument('-p', '--print-args', action='store_true', help='Output parsed args.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Output verbose information.')
-    parser.add_argument('-c', '--section', nargs=1, dest='section', help='Use differnt configuration section. A section contains `post_up`, `post_down`, `pre_up`, `pre_down` and saved `up_command`. This option will be ignored while the vpn is active. If you want to use this option on a partial up you need to use `vad up -f/--force`', default=['default'])
+    parser.add_argument('-c', '--profile', nargs=1, help='Use differnt profile. A profile contains `post_up`, `post_down`, `pre_up`, `pre_down` and saved `up_command`. This option will be ignored while the vpn is active. If you want to use this option on a partial up you need to use `vad up -f/--force`', default=['default'])
+    parser.add_argument('-n', '--no-color', action='store_true', help='Never color output')
+    parser.set_defaults(func=status_command)
 
     subparsers = parser.add_subparsers()
     subparser_args = dict(
@@ -1850,9 +2056,10 @@ def vad():
     init.add_argument('-d', '--dont-save-account-number', action='store_true', help='Does not save the account number into the configuration file. Useful if you have the account number in `pass`.')
     init.set_defaults(func=init_command)
 
-    delete = subparsers.add_parser('delete', help='Delete added device(s) from this computer from your account.', **subparser_args)
+    delete = subparsers.add_parser('delete', help='Delete mapped device(s) from this computer and your account.', **subparser_args)
+    delete.add_argument('--all', action='store_true', help='Delete all mapped devices.')
     delete.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
-    delete.add_argument('INDEX', nargs=1, metavar='INDEX', choices=['0','1','2','3','4','5','6','7','8','9'], help='Delete specified device from this computer from your account (find index with `vad info`).')
+    delete.add_argument('INDEX', nargs='?', metavar='INDEX', choices=['0','1','2','3','4','5','6','7','8','9'], help='Delete specified mapped device from this computer and your account (find index with `vad info`). BEWARE index of other devices change after one delete.')
     delete.set_defaults(func=delete_command)
 
     info = subparsers.add_parser('info', help='View account information and highlight devices added to this computer.', **subparser_args)
@@ -1867,20 +2074,20 @@ def vad():
 
     up = subparsers.add_parser('up', aliases=['u'], help=f'Set up a vpn tunnel: move all physical network devices into the physical network namespace, configure one or more mullvad server and setup a wireguard device in the root namespace. All programs from non root users are forced to use the wireguard device in the root namespace.')
     up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the server\'s hostname. The sequence determines the data flow. More hops require more devices (see `vad init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the European Union then use "eu". If you only want to use hops from countries on the European continent then use "ex". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vad up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
-    up.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial up. This also allows changing the configuration section with the `vad -c <section> up` argument.')
+    up.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial up. This also allows changing the profile with the `vad -c <profile> up` argument.')
     up.add_argument('-s', '--dont-save', action='store_true', help='Do not save the last call with arguments to the configuration file.')
     up.add_argument('-a', '--update-server-list', action='store_true', help='Update server list.')
     up.add_argument('-n', '--dry-run', action='store_true', help='Show only chosen hop(s) and nameserver.')
     up.add_argument('-d', '--dns', nargs=1, help='Set a blocking dns server by flags (atmpg) or with no flags use the nonblocking dns server (10.64.0.1): a = Block adverdisments, t = Block tracking, m = Block malicious sites, p = Block adult content, g = Block gampling sites.', default='')
     up.add_argument('-w', '--without-multihop', action='store_true', help='Normally pairs of hops are taken and configured as multihop beginning from the last hop. Every hop pair requires one device, with this option every hop requires one device.', default=False)
     up.add_argument('-u', '--uniform-by-country', action='store_true', help='Randomly select a country and then randomly select a hop.')
-    up.add_argument('-o', '--owned-entry', action='store_true', help='Use a owned server by Mullvad for your entry hop.', default=None)
-    up.add_argument('-b', '--diskless-entry', action='store_true', help='Use a diskless server for your entry hop (stboot [BETA]).', default=None)
+    up.add_argument('-o', '--owned-entry', action='store_true', help='Use a owned server by Mullvad for your entry hop.')
+    up.add_argument('-b', '--diskless-entry', action='store_true', help='Use a diskless server for your entry hop (stboot [BETA]).')
     up.add_argument('-6', '--only-use-ipv6', action='store_true', help='Only use IPv6 addresses.')
     up.set_defaults(func=up_command)
 
     down = subparsers.add_parser('down', aliases=['d'], help='Tear down the vpn configuration and restore the previous state.')
-    down.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial down. This also allows changing the configuration section with the `vad -c <section> up` argument.')
+    down.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial down. This also allows changing the profile with the `vad -c <profile> up` argument.')
     down.add_argument('-p', '--partial', action='store_true', help=f'Do not delete the physical namespace. Your physical network interfaces will remain in this namespace, which leaves you with no network access at all. Useful if you manually configured your physical network namespace.', default=False)
     down.set_defaults(func=down_command)
 
@@ -1888,9 +2095,10 @@ def vad():
     exec.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to execute in the physical namespace with or without arguments.')
     exec.set_defaults(func=exec_command)
 
-    status = subparsers.add_parser('status', aliases=['s'], help='Show vpn status information.', **subparser_args)
+    status = subparsers.add_parser('status', aliases=['s'], help='Show vpn status information, return 0 if active otherwise 1.', **subparser_args)
     status.set_defaults(func=status_command)
 
+    # TODO: remove
     dev = subparsers.add_parser('dev', help='List all network devices in the current namespace.')
     dev.add_argument('-r', '--raw', action='store_true', help='Output device information as yaml.')
     dev.set_defaults(func=dev_command)
@@ -1912,11 +2120,23 @@ def vad():
     list.add_argument('-b', '--diskless', action='store_true', help='Filter by diskless boot servers (stboot [BETA]).', default=None)
     list.set_defaults(func=list_command)
 
-    rotate = subparsers.add_parser('rotate', help='Rotate WireGuard keys from all mapped devices')
+    service = subparsers.add_parser('service', help='Install and remove services and timers.')
+    service_subparser = service.add_subparsers()
+    service_install = service_subparser.add_parser('install', aliases=['i'], help='Installs a service which automatically starts the VPN on system startup and tears it down on system shutdown. A udev rule move new network devices into physical namespace and automatically creates it if it does not exists. A timer will rotate WireGuard keys every 4 days (same as the mullvad app).')
+    service_install.set_defaults(func=service_install_command)
+    service_remove = service_subparser.add_parser('remove', aliases=['rm'], help='Removes all installed services.')
+    service_remove.set_defaults(func=service_remove_command)
+    service.set_defaults(func=lambda args: service.print_help())
+
+    move = subparsers.add_parser('move', aliases=['mv'], help='Move device into physical namespace and if it does not exist create it.')
+    move.add_argument('INTERFACE', nargs=1, help='Interface name that will be moved.')
+    move.set_defaults(func=move_command)
+
+    rotate = subparsers.add_parser('rotate', help='Rotate WireGuard keys from all mapped devices.')
     rotate.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     rotate.set_defaults(func=rotate_command)
 
-    reset = subparsers.add_parser('reset', help='Tear down vpn, delete all mapped devices to this computer, remove services added through `vpn service` and remove account related information from configuration')
+    reset = subparsers.add_parser('reset', help='Tear down vpn, delete all mapped devices to this computer, remove services added through `vpn service` and remove account related information from configuration.')
     reset.set_defaults(func=reset_command)
 
     test = subparsers.add_parser('test', help='Run unittests.')
@@ -1929,6 +2149,10 @@ def vad():
 
     global VERBOSE
     VERBOSE = args.verbose
+
+    global colored
+    if args.no_color:
+        colored = nop_colored
 
     if args.print_args:
         if os.geteuid() == 0:
