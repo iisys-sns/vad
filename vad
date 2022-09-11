@@ -608,15 +608,16 @@ def config_rebuild_up_command(config, profile_name, parser_up):
         'COUNTRY_CITY_HOSTNAME',
     ]
 
-    defaults_args = dict(vars(parser_up.parse_args([])))
+    defaults = dict(vars(parser_up.parse_args([])))
 
     for name in order:
         if name not in up_command:
             continue
+        if name not in defaults:
+            continue
         value = up_command[name]
-        if name in defaults_args:
-            if defaults_args[name] == value:
-                continue
+        if defaults[name] == value:
+            continue
         if name == 'COUNTRY_CITY_HOSTNAME':
             cmdline.extend(value)
         elif name == 'dns':
@@ -625,10 +626,10 @@ def config_rebuild_up_command(config, profile_name, parser_up):
                 cmdline.append(value[0])
             else:
                 cmdline.append(value)
-        elif isinstance(value, bool):
+        elif isinstance(defaults[name], bool) and value:
             cmdline.append('--%s' % name.replace('_', '-'))
         else:
-            assert False
+            assert False, "Can not handle %s attribute!" % name
 
     return subprocess.list2cmdline(cmdline)
 
