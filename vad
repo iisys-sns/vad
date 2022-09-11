@@ -2027,9 +2027,11 @@ def is_default_arguments(parser, subparser, args):
     defaults_parser = vars(parser.parse_args([]))
     defaults = get_default_arguments(parser, subparser)
     args_to_compare = {**vars(args), **defaults_parser}
-    args_to_compare['dry_run'] = False
-    args_to_compare['dont_save'] = False
+    args_to_compare['func'] = None
     args_to_compare['force'] = False
+    args_to_compare['dont_save'] = False
+    args_to_compare['dry_run'] = False
+    defaults['func'] = None
     return defaults == args_to_compare
 
 
