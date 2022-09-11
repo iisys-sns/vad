@@ -761,16 +761,16 @@ def get_city_ports(city_ports):
     return ports
 
 
-def print_peer_table(peers, this_peers, show_device_id):
+def print_peer_table(peers, this_peers, show_ipv6, show_device_id):
     add_peer = lambda current, peer: table.add_row([
             current,
             '✓' if peer['app'] else '',
             peer['created']] +
             ([peer['device_id']] if show_device_id else []) +
             [peer['device_name'].title(),
-            peer['ipv4_address'],
-            peer['ipv6_address'],
-            peer['key']['public'],
+            peer['ipv4_address']] +
+            ([peer['ipv6_address']] if show_ipv6 else []) +
+            [peer['key']['public'],
             '✓' if peer['can_add_ports'] else '',
             '\n'.join([str(port) for port in  peer['ports']]),
             '\n'.join(get_city_ports(peer['city_ports']))
@@ -781,7 +781,12 @@ def print_peer_table(peers, this_peers, show_device_id):
     if show_device_id:
         fields.append('ID')
 
-    fields.extend(['Name', 'IPv4', 'IPv6', 'Public Key', 'Can Add Ports', 'Ports', 'City Ports'])
+    fields.extend(['Name', 'IPv4'])
+
+    if show_ipv6:
+        fields.append('IPv6')
+
+    fields.extend(['Public Key', 'Can Add Ports', 'Ports', 'City Ports'])
 
     table = PrettyTable(fields)
 
@@ -857,7 +862,7 @@ def info_command(args, parser_up):
             for city_port in account['city_ports']:
                 print('- %s-%s' % (city_port['city_code'], city_port['port']))
             print()
-            print_peer_table(account['wg_peers'], peers, args.show_device_ids)
+            print_peer_table(account['wg_peers'], peers, args.show_ipv6, args.show_device_ids)
             print()
             log_info('If you only call `vad up` this command will be executed: ', end='')
             print(config_rebuild_up_command(
@@ -2068,6 +2073,7 @@ def vad():
     info.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     info.add_argument('-a', '--show-account-number', action='store_true', help='Shows the account number.')
     info.add_argument('-s', '--show-device-ids', action='store_true', help='Show device ids.')
+    info.add_argument('-6', '--show-ipv6', action='store_true', help='Show IPv6 address column of device.')
     info.add_argument('-r', '--raw', action='store_true', help='Output raw account information.')
     info.set_defaults(func=info_command)
 
