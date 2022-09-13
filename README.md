@@ -18,9 +18,9 @@ The physical devices will stay inaccessible until an `vad down`.
 1. Only works under Linux (requires network namespaces);
 1. You have a Mullvad account;
 1. You only want to use WireGuard servers (not OpenVPN);
-1. You don't have a network interface with the name `mullvad0`;
-1. You don't have WireGuard configuration files with the names `/etc/wireguard/mullvad[0-9]`;
-1. You don't have other network namespaces with the name `physical` or `mullvad[1-9]`;
+1. You don't have network interfaces with the names `vad[0-9]`;
+1. You don't have WireGuard configuration files with the names `/etc/wireguard/vad[0-9]`;
+1. You don't have other network namespaces with the name `physical` or `vad[1-9]`;
 1. Uses `wpa_supplicant` to configure wlan devices (if you use e.g. NetworkManager you need to duplicate the configuration); and;
 1. You don't want to use Socks Proxies for Multihop.
 
@@ -234,7 +234,7 @@ Reset:
 $ vad reset
 $ # Corresponds to the following commands, but additonally deletes account-related information from the configuration file.
 $ # vad delete --all
-$ # vad service rm (TODO)
+$ # vad service rm
 $ # vad down
 ```
 
