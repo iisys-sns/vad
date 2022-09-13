@@ -1426,10 +1426,11 @@ def service_config():
 
     vad_up_service = """
     [Unit]
-    Description=Execute vad up
+    Description=Execute `vad update` and `vad up`
 
     [Service]
     Type=oneshot
+    ExecStartPre=-vad -nv update
     ExecStartPre=vad -nv status
     ExecStart=vad -nv up
     """
@@ -1437,7 +1438,7 @@ def service_config():
     vad_up_timer = """
     [Unit]
     After=network-online.target
-    Description=Execute vad up daily at 03:00 to refresh hop endpoints
+    Description=Execute `vad update` and `vad up` daily at 03:00 to refresh hop endpoints
 
     [Timer]
     OnCalendar=*-*-* 03:00
