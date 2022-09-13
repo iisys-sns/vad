@@ -877,7 +877,7 @@ def info_command(args, parser_up):
         request_logout(login)
 
 
-def status_command(args):
+def show_command(args):
     become_root()
 
     if is_active():
@@ -1432,7 +1432,7 @@ def service_config():
     [Service]
     Type=oneshot
     ExecStartPre=-vad -nv update
-    ExecStartPre=vad -nv status
+    ExecStartPre=vad -nv show
     ExecStart=vad -nv up
     """
 
@@ -2072,7 +2072,7 @@ def vad():
     parser.add_argument('-v', '--verbose', action='store_true', help='Output verbose information.')
     parser.add_argument('-c', '--profile', nargs=1, help='Use differnt profile. A profile contains `post_up`, `post_down`, `pre_up`, `pre_down` and saved `up_command`. This option will be ignored while the vpn is active. If you want to use this option on a partial up you need to use `vad up -f/--force`', default=['default'])
     parser.add_argument('-n', '--no-color', action='store_true', help='Never color output')
-    parser.set_defaults(func=status_command)
+    parser.set_defaults(func=show_command)
 
     subparsers = parser.add_subparsers()
     subparser_args = dict(
@@ -2125,8 +2125,8 @@ def vad():
     exec.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to execute in the physical namespace with or without arguments.')
     exec.set_defaults(func=exec_command)
 
-    status = subparsers.add_parser('status', aliases=['s'], help='Show vpn status information, return 0 if active otherwise 1.', **subparser_args)
-    status.set_defaults(func=status_command)
+    show = subparsers.add_parser('show', aliases=['s'], help='Show vpn status information, return 0 if active otherwise 1.', **subparser_args)
+    show.set_defaults(func=show_command)
 
     # TODO: remove
     dev = subparsers.add_parser('dev', help='List all network devices in the current namespace.')

@@ -88,25 +88,26 @@ $ vad up
 Show status information:
 
 ```sh
-$ vad status
+$ vad show
+$ vad
 ```
 
 The up command can be called multiple times:
 
 ```sh
 $ vad up de    # Build one hop tunnel to a server in Germany
-$ vad status
+$ vad show
 $ vad up pl    # Update one hop tunnel to a server in Poland
-$ vad status
+$ vad
 $ vad up se    # Update one hop tunnel to a server in Sweden
-$ vad status
+$ vad
 ```
 
 Build a 2 hop (multihop) tunnel:
 
 ```sh
 $ vad up de pl   # 2 hops: Multihop(de, pl)
-$ vad status
+$ vad
 ```
 
 Build a 3 hop tunnel:
@@ -114,7 +115,7 @@ Build a 3 hop tunnel:
 ```sh
 $ vad init -a       # We need one more device for the first tunnel
 $ vad up de pl se   # 3 hops: Tunnel(de) -> Multihop(pl, se)
-$ vad status
+$ vad
 ```
 
 Update server list:
@@ -136,7 +137,7 @@ $ vad down
 $ vad info
 $ vad rotate
 $ vad info
-$ vad status
+$ vad
 ```
 
 Rotate WireGuard keys for all mapped devices while the VPN is active:
@@ -146,7 +147,7 @@ $ vad up         # Remembers the configuration from `vad up de pl se` and builds
 $ vad info
 $ vad rotate     # If the VPN was active, rotate will automatically call `vad up` to use the new keys
 $ vad info
-$ vad status
+$ vad
 ```
 
 Move your sshd into the physical namespace on `vad up`:
