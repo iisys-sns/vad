@@ -18,6 +18,7 @@ from datetime import datetime
 from termcolor import colored
 from argparse import Namespace
 from collections import defaultdict
+from collections import Counter
 from datetime import datetime
 from enum import Enum
 from prettytable import PrettyTable
@@ -1617,6 +1618,24 @@ def reset_command(args):
     return config
 
 
+# NOTE: All wireguard servers have unique city codes. For all servers there is only one duplicate:
+#       - Finland (fi), Helsinki (hel) and
+#       - Sweden (se), Helsingborg (hel)
+def check_unique_city_codes(servers):
+    country_cities = set([(server['country_code'], server['city_code']) for server in servers])
+    city_counter = Counter([city for country, city in country_cities])
+
+    duplicates = set()
+    for city, count in city_counter.items():
+        if count > 1:
+            for server in servers:
+                if city == server['city_code']:
+                    duplicates.add('%s (%s), %s (%s)' % (server['country_name'], server['country_code'], server['city_name'], server['city_code']))
+            log_warn("Attention, the city code '%s' is not unique:" % city)
+            for text in duplicates:
+                print('- %s' % text)
+
+
 def update_command(args):
     become_root()
 
@@ -1630,8 +1649,9 @@ def update_command(args):
         if response.ok:
             with open(SERVERS, 'w') as servers:
                 servers.write(response.text)
-            servers = filter_servers()
             os.chmod(SERVERS, 0o644)
+            servers = filter_servers()
+            check_unique_city_codes(servers)
             log_info('%s updated with %d wireguard servers' % (SERVERS, len(servers)))
         else:
             log_warn('Can not download servers from %s, because of %s' % (url_servers, response.text))

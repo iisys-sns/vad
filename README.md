@@ -242,7 +242,6 @@ $ # vad down
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until it down.
 * [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
-* [ ] Test assumptions in `update_command` about unique country and city codes
 * [ ] Use type hinting in conjunction with `mypy`
 * [ ] Implement a configuration class and api request class
 * [ ] Test if dependencies are installed while launching
