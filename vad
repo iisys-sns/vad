@@ -1235,7 +1235,7 @@ def down_command(args):
             interface_name = namespaces[idx-1]
 
             if interface_name == NAMESPACE_ROOT:
-                interface_name = 'mullvad0'
+                interface_name = 'vad0'
 
             remove_linked_device(
                 namespace_to_remove=namespaces[idx],
