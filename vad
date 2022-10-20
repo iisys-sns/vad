@@ -1312,6 +1312,20 @@ def list_command(args):
         for (country_code, country_name, city_code, city_name), count in sorted(country_cities.items(), key=lambda k: k[1]):
             table.add_row([count, country_code, country_name, city_code, city_name])
         print(table)
+    elif args.group_by_provider:
+        providers = defaultdict(int)
+        for server in servers:
+            key = (
+                server['provider']
+            )
+            providers[key] += 1
+
+        table = PrettyTable(['Count', 'Provider'])
+        table.align['Count'] = 'r'
+        table.align['Provider'] = 'l'
+        for (provider), count in sorted(providers.items(), key=lambda k: k[1]):
+            table.add_row([count, provider])
+        print(table)
     else:
         fields = ['Active', 'Owned', 'Diskless']
 
@@ -2138,6 +2152,7 @@ def vad():
     list.add_argument('--all', action='store_true', help='List also non wireguard servers and add "Type" column to table.')
     list.add_argument('-c', '--group-by-country', action='store_true', help='Group and count by country.')
     list.add_argument('-y', '--group-by-country-city', action='store_true', help='Group and count by country and city.')
+    list.add_argument('-d', '--group-by-provider', action='store_true', help='Group and count by provider.')
     list.add_argument('-4', '--show-column-ipv4', action='store_true', help='Shows ipv4 column (ignored by --group-by-*).')
     list.add_argument('-6', '--show-column-ipv6', action='store_true', help='Shows ipv6 column (ignored by --group-by-*).')
     list.add_argument('-p', '--show-column-public-key', action='store_true', help='Show public key column (ignored by --group-by-*).')
