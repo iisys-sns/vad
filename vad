@@ -341,8 +341,8 @@ def request_account_number(passname, config):
     while True:
         account_number = input("Please enter your Mullvad account number (with or w/o spaces): ")
         account_number = account_number.replace(" ", "")
-        if len(account_number) != 16 or not account_number.isdigit():
-            print("The account number must have 16 digits!")
+        if len(account_number) < 12 or len(account_number) > 16 or not account_number.isdigit():
+            print("The account number must be between 12 and 16 digits!")
             continue
         return account_number
 
