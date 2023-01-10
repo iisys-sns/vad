@@ -133,7 +133,7 @@ def log_bad(text, **kwargs):
     print(colored(text, 'red'), **kwargs)
 
 
-def print_command(process):
+def print_command(process, print_output=True):
     command = subprocess.list2cmdline(process.args)
     command = command.replace('\n','\\n')
 
@@ -142,7 +142,7 @@ def print_command(process):
     else:
         log_bad('- ' + command)
 
-    if len(process.stdout) > 0:
+    if print_output and len(process.stdout) > 0:
         lines = str(process.stdout, 'utf8')
         lines = lines.split('\n')
         output = '\n  '.join(lines)
@@ -150,7 +150,7 @@ def print_command(process):
         print('  ' + output)
 
 
-def run(args, failure_ok=False, **kwargs):
+def run(args, failure_ok=False, print_output=True, **kwargs):
     if VERBOSE:
         command = subprocess.list2cmdline(args)
         command = command.replace('\n','\\n')
@@ -160,9 +160,9 @@ def run(args, failure_ok=False, **kwargs):
     process = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kwargs)
 
     if VERBOSE:
-        print_command(process)
+        print_command(process, print_output=print_output)
     elif not failure_ok and process.returncode != 0:
-        print_command(process)
+        print_command(process, print_output=print_output)
 
     return process
 
@@ -732,7 +732,7 @@ def delete_command(args):
 
 
 def generate_private_key():
-    process = run(['wg', 'genkey'], failure_ok=True)
+    process = run(['wg', 'genkey'], failure_ok=True, print_output=False)
     key = str(process.stdout, 'utf8').strip()
     assert len(key) == 44
     return key
