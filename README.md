@@ -243,7 +243,6 @@ $ # vad down
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until it down.
 * [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
-* [ ] Use type hinting in conjunction with `mypy`
 * [ ] Implement a configuration class and api request class
 * [ ] Test if dependencies are installed while launching
 * [ ] Execute `vad down` if `vad up` fails on the critical path
@@ -276,6 +275,8 @@ $ # vad down
   ```
   The hostname search order needs to change to private-external-devices and then Mullvad servers.
   This makes the configuration step more complicated, is it worth it?
+* [ ] Use type hinting in conjunction with `mypy`.
+  Instead of making python more statically typed it is a better idea to reimplement it in a statically typed language.
 
 ## Ideas
 
