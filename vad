@@ -320,6 +320,13 @@ def server_random_choice(servers, uniform_by_country=False):
     return random.choice(servers)
 
 
+def verify_account_number(account_number):
+    # NOTE: https://mullvad.net/en/blog/2017/6/20/mullvads-account-numbers-get-longer-and-safer
+    if len(account_number) in [12, 13, 16] or not account_number.isdigit():
+        return False
+    return True
+
+
 def request_account_number(passname, config):
     if 'account_number' in config:
         return config['account_number']
@@ -341,8 +348,8 @@ def request_account_number(passname, config):
     while True:
         account_number = input("Please enter your Mullvad account number (with or w/o spaces): ")
         account_number = account_number.replace(" ", "")
-        if len(account_number) < 12 or len(account_number) > 16 or not account_number.isdigit():
-            print("The account number must be between 12 and 16 digits!")
+        if verify_account_number(account_number):
+            print("The account number must be have 12, 13 or 16 digits!")
             continue
         return account_number
 
