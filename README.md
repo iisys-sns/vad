@@ -232,6 +232,7 @@ $ # vad down
 
 ## TODOs
 
+* [ ] Revise wireguard namespace creation
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until it down.
 * [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
