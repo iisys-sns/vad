@@ -540,68 +540,39 @@ def config_save(config):
     return config
 
 
-def config_get_active_profile(config, profile_name):
-    return config.get('active_profile', profile_name)
-
-
-def config_save_profile_section(config, profile_name):
-    config['active_profile'] = profile_name
-    return config_save(config)
-
-
-def config_save_remove_profile_section(config):
-    if 'active_profile' in config:
-        del config['active_profile']
-        return config_save(config)
-    return config
-
-
-def config_save_up_command(config, profile_name, args):
-    profile = config.get(profile_name, {})
-    if not isinstance(profile, dict):
-        config[profile_name] = dict()
-    if not profile_name in config:
-        config[profile_name] = dict()
-
+def config_save_up_command(config, args):
     args_to_save = dict(vars(args))
 
     del args_to_save['func']
     del args_to_save['verbose']
     del args_to_save['print_args']
-    del args_to_save['profile']
     del args_to_save['no_color']
 
     del args_to_save['dry_run']
     del args_to_save['dont_save']
-    del args_to_save['force']
 
-    config[profile_name]['up_command'] = args_to_save
+    config['up_command'] = args_to_save
     return config_save(config)
 
 
-def config_execute_commands(config, profile_name, subsection_name):
-    profile = config.get(profile_name, {})
-    if not isinstance(profile, dict):
-        return
-    subsection = profile.get(subsection_name, [])
+def config_execute_commands(config, subsection_name):
+    subsection = config.get(subsection_name, [])
     if not isinstance(subsection, list):
         return
     if subsection:
-        log_verbose("Execute commands from '%s.%s':" % (profile_name, subsection_name))
+        log_verbose("Execute commands from '%s':" % (subsection_name))
         for command in subsection:
             run(['bash', '-c', command.replace('\\n', '\n')])
 
 
-def config_set_up_command_attributes(config, profile_name, args):
-    profile = config.get(profile_name, {})
-    up_command = profile.get('up_command', {})
+def config_set_up_command_attributes(config, args):
+    up_command = config.get('up_command', {})
     for key, value in up_command.items():
         setattr(args, key, value)
 
 
-def config_rebuild_up_command(config, profile_name, parser_up):
-    profile = config.get(profile_name, {})
-    up_command = profile.get('up_command', {})
+def config_rebuild_up_command(config, parser_up):
+    up_command = config.get('up_command', {})
 
     cmdline = ['vad', 'up']
 
@@ -876,7 +847,6 @@ def info_command(args, parser_up):
             log_info('If you only call `vad up` this command will be executed: ', end='')
             print(config_rebuild_up_command(
                 config,
-                config_get_active_profile(config, args.profile[0]),
                 parser_up))
     except Exception as e:
         log_fatal('Error while trying to show account information (%s)!' % str(e))
@@ -987,10 +957,7 @@ def up_command(args, is_default):
         log_fatal('No configuration file found or not readable (use `vad init` to create one)!')
 
     if is_default:
-        if args.force:
-            config_set_up_command_attributes(config, args.profile[0], args)
-        else:
-            config_set_up_command_attributes(config, config_get_active_profile(config, args.profile[0]), args)
+        config_set_up_command_attributes(config, args)
 
     if args.update_server_list:
         update_command(None)
@@ -1073,15 +1040,12 @@ def up_command(args, is_default):
 
     was_already_active = is_active()
 
-    if was_already_active and args.profile[0] != config_get_active_profile(config, 'default') and not args.force:
-        log_warn('Changing the configuration to "%s" on an active connection will be ignored unless you use `-f/--force`. But this will also execute all `pre_down` and `post_down` commands from the current configuration.' % args.profile[0])
-
     if was_already_active:
         log_verbose("Was already active, do a partial tear down.")
-        config = down_command(Namespace(profile=args.profile, partial=True, force=args.force))
+        config = down_command(Namespace(partial=True))
 
-    if not physical_already_existed or args.force:
-        config_execute_commands(config, args.profile[0], 'pre_up')
+    if not physical_already_existed:
+        config_execute_commands(config, 'pre_up')
 
     log_info("Configure:", highlight=True)
     print(description)
@@ -1160,11 +1124,10 @@ def up_command(args, is_default):
     update_resolvconf(get_dns_from_args(args))
 
     if not is_default and config and not args.dont_save:
-        config = config_save_up_command(config, config_get_active_profile(config, args.profile[0]), args)
+        config = config_save_up_command(config, args)
 
-    if not physical_already_existed or args.force:
-        config_execute_commands(config, config_get_active_profile(config, args.profile[0]), 'post_up')
-        config = config_save_profile_section(config, args.profile[0])
+    if not physical_already_existed:
+        config_execute_commands(config, 'post_up')
 
     run(['systemctl', 'unmask', 'vad.move@.service'])
     log_success("VPN is successfully up!")
@@ -1223,8 +1186,8 @@ def down_command(args):
 
     config = config_load()
 
-    if config and (not args.partial or args.force):
-        config_execute_commands(config, config_get_active_profile(config, args.profile[0]), 'pre_down')
+    if config and (not args.partial):
+        config_execute_commands(config, 'pre_down')
 
     remove_file_if_exists(DESCRIPTION)
     remove_file_if_exists(CONFIGURATION_HOP % 0)
@@ -1259,9 +1222,8 @@ def down_command(args):
                 device_name=interface_name,
             )
 
-    if (config and not args.partial) or args.force:
-        config_execute_commands(config, config_get_active_profile(config, args.profile[0]), 'post_down')
-        config = config_save_remove_profile_section(config)
+    if (config and not args.partial):
+        config_execute_commands(config, 'post_down')
 
     if args.partial:
         log_success("VPN is succefully down (partial)")
@@ -1625,7 +1587,7 @@ def reset_command(args):
 
     config = delete_command(Namespace(all=True, INDEX=None, passname='web/mullvad'))
 
-    down_command(Namespace(partial=False, profile=args.profile, force=False))
+    down_command(Namespace(partial=False))
 
     if 'account_number' in config:
         del config['account_number']
@@ -2086,7 +2048,6 @@ def is_default_arguments(parser, subparser, args):
     defaults = get_default_arguments(parser, subparser)
     args_to_compare = {**vars(args), **defaults_parser}
     args_to_compare['func'] = None
-    args_to_compare['force'] = False
     args_to_compare['dont_save'] = False
     args_to_compare['dry_run'] = False
     defaults['func'] = None
@@ -2101,7 +2062,6 @@ def vad():
 
     parser.add_argument('-p', '--print-args', action='store_true', help='Output parsed args.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Output verbose information.')
-    parser.add_argument('-c', '--profile', nargs=1, help='Use differnt profile. A profile contains `post_up`, `post_down`, `pre_up`, `pre_down` and saved `up_command`. This option will be ignored while the vpn is active. If you want to use this option on a partial up you need to use `vad up -f/--force`', default=['default'])
     parser.add_argument('-n', '--no-color', action='store_true', help='Never color output')
     parser.set_defaults(func=show_command)
 
@@ -2135,7 +2095,6 @@ def vad():
 
     up = subparsers.add_parser('up', aliases=['u'], help=f'Set up a vpn tunnel: move all physical network devices into the physical network namespace, configure one or more Mullvad server and setup a wireguard device in the root namespace. All programs from non root users are forced to use the wireguard device in the root namespace.')
     up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the server\'s hostname. The sequence determines the data flow. More hops require more devices (see `vad init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the European Union then use "eu". If you only want to use hops from countries on the European continent then use "ec". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vad up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
-    up.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial up. This also allows changing the profile with the `vad -c <profile> up` argument.')
     up.add_argument('-s', '--dont-save', action='store_true', help='Do not save the last call with arguments to the configuration file.')
     up.add_argument('-a', '--update-server-list', action='store_true', help='Update server list.')
     up.add_argument('-n', '--dry-run', action='store_true', help='Show only chosen hop(s) and nameserver.')
@@ -2148,7 +2107,6 @@ def vad():
     up.set_defaults(func=up_command)
 
     down = subparsers.add_parser('down', aliases=['d'], help='Tear down the vpn configuration and restore the previous state.')
-    down.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial down. This also allows changing the profile with the `vad -c <profile> up` argument.')
     down.add_argument('-p', '--partial', action='store_true', help=f'Do not delete the physical namespace. Your physical network interfaces will remain in this namespace, which leaves you with no network access at all. Useful if you manually configured your physical network namespace.', default=False)
     down.set_defaults(func=down_command)
 
