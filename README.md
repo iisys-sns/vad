@@ -185,19 +185,11 @@ $ vad up
 ```
 
 You want to use other `*_up` and/or `*_down` commands; and a differnt hop configuration for work?
+Copy your current configuration `/etc/vad/config.yaml` to `/etc/vad/work.yaml`.
 
 ```sh
-$ vad -c work up --dns atmpg eu    # Connect to a random server in the European Union and no adult content (p) for work :) See `vad up --help` for `--dns` flags.
-$ vad up                           # Connect to another random server in the European Union with the same nameserver.
-$ vad down                         # The "work" profile will stay active until `vad down`.
-$ vad up                           # Will use the "default" profile again.
-```
-
-Switch profile on the fly:
-
-```sh
-$ vad -c work up --force           # This will execute `pre_down` and `post_down` commands from "default", activates the "work" profile and executes `pre_up` and `post_up` commands from it.
-$ vad -c default up                # If you call it without `--force`, it will warn you that it ignores `-c default` and executes an up in the "work" profile.
+$ vad -c /etc/vad/work.yaml up --dns atmpg eu  # Connect to a random server in the European Union. See `vad up --help` for `--dns` flags.
+$ vad -c /etc/vad/work.yaml up                 # Connect to another random server in the European Union with the same nameserver.
 ```
 
 Portforwarding and game servers (TODO Does not work at the moment but gives a preview how it could work):
@@ -218,14 +210,14 @@ $ vad list <country>      # Normally you want a game server close to the people 
                           # This is a good alternative if you just want to start a server temporarly or from time to time
                           # and do not want to deal with a changing address and ports.
                           # Choice one hostname from the list. In our experience the ip address does not change (that often).
-$ vad -c <game> up <hostname>         # Use the hostname.
+$ vad up <hostname>                   # Use the hostname.
 $ vad port <game-server-port>         # This will allocate a differnt port from your account (e.g. 60606),
 <hostname-exit-ip>:60606 -> <game-server-port>
                                       # if you do not have ports left it will ask you which port you want to delete from your mapped devices.
                                       # Now you can edit the configuration and add `*_pre` and `*_post` commands so everythings starts automatically.
                                       # At least you need to add `vad port <game-server-port>` in `post_up`.
 $ vad down                            # Not running
-# vad -c <game> up                    # Running game server. Have fun :)
+# vad up                              # Running game server. Have fun :)
 ```
 
 Reset:
