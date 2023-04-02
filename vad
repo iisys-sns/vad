@@ -1657,6 +1657,15 @@ def check_unique_city_codes(servers):
                 print('- %s' % text)
 
 
+def check_special_country_codes_not_in_use(servers):
+    countries = set([server['country_code'] for server in servers])
+    for server in servers:
+        if 'eu' == server['country_code']:
+            log_warn("Attention, the special country code 'eu' used by this script is in use by a server. This makes this server unselectable! (%s)", str(server))
+        if 'ec' == server['country_code']:
+            log_warn("Attention, the special country code 'ec' used by this script is in use by a server. This makes this server unselectable! (%s)", str(server))
+
+
 def update_command(args):
     become_root()
 
@@ -1673,6 +1682,7 @@ def update_command(args):
             os.chmod(SERVERS, 0o644)
             servers = filter_servers()
             check_unique_city_codes(servers)
+            check_special_country_codes_not_in_use(servers)
             log_info('%s updated with %d wireguard servers' % (SERVERS, len(servers)))
         else:
             log_warn('Can not download servers from %s, because of %s' % (url_servers, response.text))
