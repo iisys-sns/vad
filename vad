@@ -422,7 +422,7 @@ def request_login_api(account_number, config):
         api_expiry=app['expiry'],
     )
 
-    return config_save(config)
+    return config_save(args.config, config)
 
 
 def request_add_key(login):
@@ -520,11 +520,11 @@ def request_logout(login):
     return response.ok
 
 
-def config_load():
-    if not os.path.exists(CONFIGURATION):
+def config_load(filename):
+    if not os.path.exists(filename):
         return False
 
-    with open(CONFIGURATION) as c:
+    with open(filename) as c:
         config = yaml.safe_load(c)
     for key in config:
         if config[key] is None:
@@ -532,11 +532,11 @@ def config_load():
     return config
 
 
-def config_save(config):
+def config_save(filename, config):
     assert isinstance(config, dict)
-    with open(CONFIGURATION, 'w') as c:
+    with open(filename, 'w') as c:
         yaml.dump(config, c)
-    os.chmod(CONFIGURATION, 0o600)
+    os.chmod(filename, 0o600)
     return config
 
 
@@ -552,7 +552,7 @@ def config_save_up_command(config, args):
     del args_to_save['dont_save']
 
     config['up_command'] = args_to_save
-    return config_save(config)
+    return config_save(args.config, config)
 
 
 def config_execute_commands(config, subsection_name):
@@ -616,7 +616,7 @@ def config_rebuild_up_command(config, parser_up):
 def init_command(args):
     become_root()
 
-    config = config_load()
+    config = config_load(args.config)
 
     if isinstance(config, dict):
         if not 'devices' in config:
@@ -662,7 +662,7 @@ def init_command(args):
         else:
             config['account_number'] = account_number
 
-        config = config_save(config)
+        config = config_save(args.config, config)
 
         if len(config['devices']) == 1:
             log_info('First device added (you can now use `vad up`)')
@@ -677,7 +677,7 @@ def init_command(args):
 def delete_command(args):
     become_root()
 
-    config = config_load()
+    config = config_load(args.config)
 
     if not args.all and args.INDEX is None:
         log_warn('Specify a INDEX or use `--all`')
@@ -702,7 +702,7 @@ def delete_command(args):
             request_revoke_key(login, public_key)
             config['devices'].remove(device)
             log_info("Deleted device %s (index %d)!" % (public_key, index))
-        config = config_save(config)
+        config = config_save(args.config, config)
     finally:
         request_logout(login)
 
@@ -786,7 +786,7 @@ def print_peer_table(peers, this_peers, show_ipv6, show_device_id):
 def info_command(args, parser_up):
     become_root()
 
-    config = config_load()
+    config = config_load(args.config)
     account_number = request_account_number(args.passname, config)
     login = request_login(account_number)
 
@@ -952,9 +952,12 @@ def print_status_connected():
 def up_command(args, is_default):
     become_root()
 
-    config = config_load()
+    config = config_load(args.config)
     if not config or not isinstance(config, dict):
-        log_fatal('No configuration file found or not readable (use `vad init` to create one)!')
+        if args.config == CONFIGURATION:
+            log_fatal('Default configuration file not found or is not readable (use `vad init` to create one)!')
+        else:
+            log_fatal('Configuration file "%s" not found or is not readable!' % args.config)
 
     if is_default:
         config_set_up_command_attributes(config, args)
@@ -1042,7 +1045,7 @@ def up_command(args, is_default):
 
     if was_already_active:
         log_verbose("Was already active, do a partial tear down.")
-        config = down_command(Namespace(partial=True))
+        config = down_command(Namespace(config=args.config, partial=True))
 
     if not physical_already_existed:
         config_execute_commands(config, 'pre_up')
@@ -1184,7 +1187,7 @@ def down_command(args):
 
     run(['systemctl', 'mask', 'vad.move@.service'])
 
-    config = config_load()
+    config = config_load(args.config)
 
     if config and (not args.partial):
         config_execute_commands(config, 'pre_down')
@@ -1559,7 +1562,7 @@ def move_command(args):
 def rotate_command(args, up_command_defaults):
     become_root()
 
-    config = config_load()
+    config = config_load(args.config)
     account_number = request_account_number(args.passname, config)
     config = request_login_api(account_number, config)
 
@@ -1570,7 +1573,7 @@ def rotate_command(args, up_command_defaults):
         device['ipv6'] = peer['ipv6_address']
         device['device_id'] = peer['id']
         device['device_name'] = peer['name']
-        config_save(config)
+        config_save(args.config, config)
 
     log_success("Successfully rotated WireGuard keys of all mapped devices")
 
@@ -1585,16 +1588,16 @@ def reset_command(args):
 
     service_remove_command(Namespace())
 
-    config = delete_command(Namespace(all=True, INDEX=None, passname='web/mullvad'))
+    config = delete_command(Namespace(config=args.config, all=True, INDEX=None, passname='web/mullvad'))
 
-    down_command(Namespace(partial=False))
+    down_command(Namespace(config=args.config, partial=False))
 
     if 'account_number' in config:
         del config['account_number']
     if 'auth' in config:
         del config['auth']
 
-    config = config_save(config)
+    config = config_save(args.config, config)
 
     log_success("Successfully reseted")
 
@@ -2063,6 +2066,7 @@ def vad():
     parser.add_argument('-p', '--print-args', action='store_true', help='Output parsed args.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Output verbose information.')
     parser.add_argument('-n', '--no-color', action='store_true', help='Never color output')
+    parser.add_argument('-c', '--config', help='Use this configuration file', default=CONFIGURATION)
     parser.set_defaults(func=show_command)
 
     subparsers = parser.add_subparsers()
