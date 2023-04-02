@@ -45,8 +45,8 @@ CONFIGURATION = f'{PREFIX}/{NAME}/config.yaml'
 SERVERS = f'{PREFIX}/{NAME}/servers.json'
 NAMESPACE_ROOT = '1'
 NAMESPACE_PHYSICAL = 'physical'
-EUROPE = ["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu", "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se"]
-EUROPE_EXTENDED = ["is", "no", "li", "ch", "uk", "gb", "me", "mk", "al", "rs", "tr", "ba", "xk", "am", "az", "by", " md", "ge", "ua"]
+EUROPE_UNION = ["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu", "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se"]
+EUROPE_CONTINENT = EUROPE_UNION + ["is", "no", "li", "ch", "uk", "gb", "me", "mk", "al", "rs", "tr", "ba", "xk", "am", "az", "by", " md", "ge", "ua"]
 
 
 class DeviceType(Enum):
@@ -286,9 +286,9 @@ def filter_servers(type='wireguard', owned=None, active=None, country_city_hostn
 
     if country_city_hostname is not None and not country_city_hostname == 'w':
         if country_city_hostname == 'eu':
-            servers = filter(lambda server: server['country_code'] in EUROPE, servers)
-        elif country_city_hostname == 'ex':
-            servers = filter(lambda server: server['country_code'] in EUROPE + EUROPE_EXTENDED, servers)
+            servers = filter(lambda server: server['country_code'] in EUROPE_UNION, servers)
+        elif country_city_hostname == 'ec':
+            servers = filter(lambda server: server['country_code'] in EUROPE_CONTINENT, servers)
         elif len(country_city_hostname) == 2:
             servers = filter(lambda server: server['country_code'] == country_city_hostname, servers)
         elif len(country_city_hostname) == 3:
@@ -2117,7 +2117,7 @@ def vad():
     update.set_defaults(func=update_command)
 
     up = subparsers.add_parser('up', aliases=['u'], help=f'Set up a vpn tunnel: move all physical network devices into the physical network namespace, configure one or more Mullvad server and setup a wireguard device in the root namespace. All programs from non root users are forced to use the wireguard device in the root namespace.')
-    up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the server\'s hostname. The sequence determines the data flow. More hops require more devices (see `vad init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the European Union then use "eu". If you only want to use hops from countries on the European continent then use "ex". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vad up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
+    up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the server\'s hostname. The sequence determines the data flow. More hops require more devices (see `vad init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the European Union then use "eu". If you only want to use hops from countries on the European continent then use "ec". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vad up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
     up.add_argument('-f', '--force', action='store_true', help='Force execution of `*_up` and `*_down` commands on a partial up. This also allows changing the profile with the `vad -c <profile> up` argument.')
     up.add_argument('-s', '--dont-save', action='store_true', help='Do not save the last call with arguments to the configuration file.')
     up.add_argument('-a', '--update-server-list', action='store_true', help='Update server list.')
