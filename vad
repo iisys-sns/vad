@@ -1322,6 +1322,7 @@ def down_command(args):
     if args.partial:
         log_success("VPN is succefully down (partial)")
     else:
+        run(['systemctl', 'unmask', 'vad.move@.service'])
         log_success("VPN is succefully down")
 
     return config
