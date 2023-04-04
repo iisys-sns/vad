@@ -36,6 +36,7 @@ The physical devices will stay inaccessible until an `vad down`.
 1. `dhcpcd`,
 1. `sysctl`,
 1. `python-yaml`,
+1. `python-dbus`,
 1. `python-requests`,
 1. `python-termcolor`,
 1. `python-prettytable` (for info and list command),
