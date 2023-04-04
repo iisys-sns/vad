@@ -77,6 +77,12 @@ network={
 }
 ```
 
+If you do not want do configure it manually and; have NetworkManager; currently connected to an wifi network; and; `wpa_supplicant` is used, you can execute this command:
+
+```sh
+vad up -i
+```
+
 If you have any problems, use `vad down` it will (usually) rollback all changes from `vad up`.
 
 First use:
