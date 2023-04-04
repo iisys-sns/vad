@@ -124,9 +124,13 @@ def log_warn(text, **kwargs):
     print(colored(text, 'yellow'), **kwargs)
 
 
+class Abort(Exception):
+    pass
+
+
 def log_fatal(text, **kwargs):
     log_bad(text, **kwargs)
-    exit(1)
+    raise Abort
 
 
 def log_bad(text, **kwargs):
@@ -167,10 +171,15 @@ def run(args, failure_ok=False, print_output=True, **kwargs):
     return process
 
 
+class CommandFailed(Abort):
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+
 def run_or_fail(args, **kwargs):
     process = run(args, **kwargs)
     if process.returncode != 0:
-        sys.exit(process.returncode)
+        raise CommandFailed(process.returncode)
     return process
 
 
@@ -681,7 +690,7 @@ def delete_command(args):
 
     if not args.all and args.INDEX is None:
         log_warn('Specify a INDEX or use `--all`')
-        exit(1)
+        raise Abort()
     elif args.all:
         devices = config['devices']
     else:
@@ -875,10 +884,10 @@ def show_command(args):
         print()
     else:
         log_bad("You are not connected to Mullvad.")
-        exit(1)
+        raise Abort()
 
     if not print_status_connected():
-        exit(1)
+        raise Abort()
 
 
 def describe_server(server):
@@ -1037,7 +1046,7 @@ def up_command(args, is_default):
     if args.dry_run:
         log_info("Would configure:", highlight=True)
         print(description)
-        exit(0)
+        sys.exit(0)
 
     physical_already_existed = network_namespace_exists(NAMESPACE_PHYSICAL)
 
@@ -2195,7 +2204,14 @@ def vad():
             args.func(args)
     except KeyboardInterrupt:
         sys.exit(1)
-
+    except CommandFailed as e:
+        # TODO: Should this only apply to the first `vad up`, and not to the following?
+        log_warn("A command failed during `vad up`, to leave the network in a working state we will undo all changes with `vad down`.")
+        if args.func == up_command:
+            down_command(Namespace(config=args.config, partial=False))
+        sys.exit(e.returncode)
+    except Abort:
+        sys.exit(1)
 
 if __name__ == "__main__":
     vad()
