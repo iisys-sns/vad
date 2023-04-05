@@ -407,7 +407,7 @@ def request_account(login):
         log_fatal("Could not parse account information (%s)!" % (str(e)))
 
 
-def request_login_api(account_number, config):
+def request_login_api(args, account_number, config):
     auth = config.get('auth', None)
     if auth:
         expires = datetime.strptime(auth['api_expiry'], "%Y-%m-%dT%H:%M:%S+00:00")
@@ -1656,7 +1656,7 @@ def rotate_command(args, up_command_defaults):
 
     config = config_load(args.config)
     account_number = request_account_number(args.passname, config)
-    config = request_login_api(account_number, config)
+    config = request_login_api(args, account_number, config)
 
     for device in config.get('devices', []):
         private_key, peer = request_update_public_key(config, device)
