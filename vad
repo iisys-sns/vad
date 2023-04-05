@@ -1014,7 +1014,7 @@ def workaround_fetch_current_wifi_configuration():
                     config[str(key)] = str(value)
             except Exception as e:
                 log_bad("Can not retrieve wifi information from wpa supplicant over DBus (%s)" % str(e))
-                return {}
+                return None
 
             # FIXME: Why does wpa supplicant not send us the secrets?
             try:
@@ -1023,7 +1023,7 @@ def workaround_fetch_current_wifi_configuration():
                 network_manager_set_secret(uuid, config)
             except Exception as e:
                 log_bad("Can not retrieve wifi information from wpa supplicant over DBus (%s)" % str(e))
-                return {}
+                return None
 
             return config
 
@@ -1151,7 +1151,8 @@ def up_command(args, is_default):
     if not physical_already_existed:
         if args.auto_configure_wifi:
             wifi_config = workaround_fetch_current_wifi_configuration()
-            write_wpa_supplicant_config(wifi_config)
+            if wifi_config is not None:
+                write_wpa_supplicant_config(wifi_config)
         config_execute_commands(config, 'pre_up')
 
     log_info("Configure:", highlight=True)
