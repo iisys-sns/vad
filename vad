@@ -5,6 +5,7 @@ import json
 import math
 import os
 import random
+import re
 import requests
 import shutil
 import subprocess
@@ -141,10 +142,7 @@ def log_bad(text, **kwargs):
 
 
 def print_command(process, print_output=True, **kwargs):
-    if 'shell' in kwargs and kwargs['shell']:
-        command = process.args
-    else:
-        command = subprocess.list2cmdline(process.args)
+    command = subprocess.list2cmdline(process.args)
     command = command.replace('\n','\\n')
 
     if process.returncode == 0:
@@ -162,10 +160,7 @@ def print_command(process, print_output=True, **kwargs):
 
 def run(args, failure_ok=False, print_output=True, **kwargs):
     if VERBOSE:
-        if 'shell' in kwargs and kwargs['shell']:
-            command = args
-        else:
-            command = subprocess.list2cmdline(args)
+        command = subprocess.list2cmdline(args)
         command = command.replace('\n','\\n')
         if sys.stdout.isatty() and sys.stderr.isatty():
             log_info('= ' + command + '\r', end='')
@@ -967,6 +962,36 @@ def print_status_connected():
         return False
 
 
+def network_manager_get_active_connection(device_name):
+    process = run(
+        ["nmcli", "con", "show", "--active"],
+        failure_ok=True, print_output=False
+    )
+    output = str(process.stdout, 'utf8').strip()
+    for line in output.split('\n'):
+        ssid, uuid, net, name, _ = re.split("\s+", line)
+        if name == device_name:
+            return uuid
+
+
+def network_manager_set_secret(uuid, config):
+    process = run(
+        ["nmcli", "--show-secrets", "con", "show", str(uuid)],
+        failure_ok=True, print_output=False
+    )
+    output = str(process.stdout, 'utf8').strip()
+    for line in output.split('\n'):
+        key, value = line.split(':', 1)
+        key = key.strip()
+        value = value.strip()
+        if 'password' in key and not '-flags' in key and value != '--':
+            config['password'] = '"%s"' % value
+            return
+        elif 'psk' in key and not '-flags' in key and value != '--':
+            config['psk'] = '"%s"' % value
+            return
+
+
 def workaround_fetch_current_wifi_configuration():
     for device in get_network_devices():
         if device[0] == DeviceType.Wifi:
@@ -991,23 +1016,11 @@ def workaround_fetch_current_wifi_configuration():
                 log_bad("Can not retrieve wifi information from wpa supplicant over DBus (%s)" % str(e))
                 return {}
 
-            # FIXME: Why does wpa supplicant not send us the PSK?
+            # FIXME: Why does wpa supplicant not send us the secrets?
             try:
-                log_verbose("retrieve PSK from NetworkManager:")
-
-                process = run(
-                    "nmcli con show --active | grep %s | cut -d' ' -f3" % device_name,
-                    failure_ok=True, print_output=False, shell=True
-                )
-                uuid = str(process.stdout, 'utf8').strip()
-
-                process = run(
-                    "nmcli --show-secrets --fields 802-11-wireless-security.psk con show %s | cut -d: -f2 | xargs" % uuid,
-                    failure_ok=True, print_output=False, shell=True
-                )
-                psk = str(process.stdout, 'utf8').strip()
-
-                config['psk'] = '"%s"' % psk
+                log_verbose("retrieve secrets from NetworkManager:")
+                uuid = network_manager_get_active_connection(device_name)
+                network_manager_set_secret(uuid, config)
             except Exception as e:
                 log_bad("Can not retrieve wifi information from wpa supplicant over DBus (%s)" % str(e))
                 return {}
