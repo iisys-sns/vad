@@ -1253,6 +1253,7 @@ def remove_linked_device(namespace_to_remove, namespace_linked_to, device_name):
     log_verbose("Delete device %s from linked network namespace %s (birth place: %s)" % (device_name, namespace_linked_to, namespace_to_remove))
 
     if namespace_linked_to == NAMESPACE_ROOT:
+        run(['resolvconf', '-d', '%s.vad' % device_name])
         run(['ip', 'link', 'del', device_name])
     else:
         run(['ip', '-n', namespace_linked_to, 'link', 'del', device_name])
@@ -2303,9 +2304,9 @@ def vad():
     except KeyboardInterrupt:
         sys.exit(1)
     except CommandFailed as e:
-        # TODO: Should this only apply to the first `vad up`, and not to the following?
-        log_warn("A command failed during `vad up`, to leave the network in a working state we will undo all changes with `vad down`.")
+        # TODO: Should this only apply to the first `vad up`, and not to partial ups's?
         if args.func == up_command:
+            log_warn("A command failed during `vad up`, to leave the network in a working state we will undo all changes with `vad down`.")
             down_command(Namespace(config=args.config, partial=False))
         sys.exit(e.returncode)
     except Abort:
