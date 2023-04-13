@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import atexit
+import dbus
+import fcntl
 import json
 import math
 import os
@@ -10,11 +13,9 @@ import requests
 import shutil
 import subprocess
 import sys
+import textwrap
 import unittest
 import yaml
-import fcntl
-import atexit
-import dbus
 
 
 from datetime import datetime
@@ -1538,6 +1539,7 @@ def list_command(args):
         table.align['IPv4'] = 'r'
         table.align['IPv6'] = 'r'
         table.align['Gbit/s'] = 'r'
+        table.align['Messages'] = 'l'
         for server in servers:
             values = [
                 '✓' if server['active'] else '',
@@ -1574,7 +1576,8 @@ def list_command(args):
 
             if args.show_column_status_messages:
                 messages = ['%s: %s' % (message['timestamp'], message['message']) for message in server['status_messages']]
-                values.append('\n'.join(messages))
+                messages = '\n'.join(messages)
+                values.append('\n'.join(textwrap.wrap(messages, 50)))
 
             table.add_row(values)
         print(table)
