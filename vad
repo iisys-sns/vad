@@ -48,7 +48,8 @@ NAMESPACE_HOP = f'{NAME}%d'
 DESCRIPTION = f'{PREFIX}/wireguard/{NAME}.description'
 CONFIGURATION = f'{PREFIX}/{NAME}/config.yaml'
 WPA_SUPPLICANT_CONF = f'{PREFIX}/wpa_supplicant/{NAME}.conf'
-SERVERS = f'{PREFIX}/{NAME}/servers.json'
+PROVIDER_DIR = f'{PREFIX}/{NAME}'
+MULLVAD_SERVERS = f'{PROVIDER_DIR}/mullvad.json'
 NAMESPACE_ROOT = '1'
 NAMESPACE_PHYSICAL = 'physical'
 EUROPE_UNION = ["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu", "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se"]
@@ -80,6 +81,7 @@ class DeviceType(Enum):
 
 @dataclass
 class Multihop:
+    device: dict
     entry: dict
     exit: dict
     def pubkey(self):
@@ -89,11 +91,16 @@ class Multihop:
     def ipv6(self):
         return self.entry['ipv6_addr_in']
     def port(self):
+        assert 'multihop_port' in self.entry
+        assert 'multihop_port' in self.exit
         return int(self.exit['multihop_port'])
+    def provider(self):
+        return self.entry['provider']
 
 
 @dataclass
 class Hop:
+    device: dict
     server: dict
     def pubkey(self):
         return self.server['pubkey']
@@ -103,6 +110,8 @@ class Hop:
         return self.server['ipv6_addr_in']
     def port(self):
         return 51820
+    def provider(self):
+        return self.server['provider']
 
 
 def nop_colored(text, *args, **kwargs):
@@ -324,13 +333,36 @@ def get_dns_server_from_flags(flags):
         return '100.64.0.%d' % bits
 
 
+def load_servers(config):
+    providers = set(['mullvad'])
+    for device in config['devices']:
+        providers.add(device['provider'])
+
+    if len(providers) == 0:
+        log_fatal('%s does not exists, please use `vad update`, `vad up --update-server-list` or `vad init`.' % MULLVAD_SERVERS)
+
+    servers = []
+    for provider in providers:
+        filename = os.path.join(PROVIDER_DIR, provider + '.json')
+        if os.path.exists(filename):
+            with open(filename, 'r') as f:
+                provider_servers = json.load(f)
+                for provider_server in provider_servers:
+                    provider_server['provider'] = provider
+                servers.extend(provider_servers)
+        else:
+            log_warn('%s does not exists.' % provider)
+
+    return servers
+
+
 def filter_servers(type='wireguard', owned=None, active=None, country_city_hostname=None, diskless=None, servers=None):
     if servers is None:
-        if os.path.exists(SERVERS):
-            with open(SERVERS) as f:
+        if os.path.exists(MULLVAD_SERVERS):
+            with open(MULLVAD_SERVERS) as f:
                 servers = json.load(f)
         else:
-            log_fatal('%s does not exists, please use `vad update`, `vad up --update-server-list` or `vad init`.' % SERVERS)
+            log_fatal('%s does not exists, please use `vad update`, `vad up --update-server-list` or `vad init`.' % MULLVAD_SERVERS)
 
     if type is not None:
         servers = filter(lambda server: server['type'] == type, servers)
@@ -511,6 +543,8 @@ def request_add_key(login):
 
 
 def request_update_public_key(config, device):
+    assert device['provider'] == 'mullvad'
+
     if not 'device_id' in device:
         return
 
@@ -710,6 +744,7 @@ def init_command(args):
                     ipv6=peer['ipv6_address'],
                     device_id=device['device_id'],
                     device_name=device['device_name'],
+                    provider='mullvad',
                 ))
                 break
 
@@ -979,7 +1014,8 @@ def setup_wireguard_device(namespace, namespace_link_to, device_name, config_fil
     run_or_fail(execute_namespace + ["wg", "setconf", device_name, config_filename])
     if not only_use_ipv6:
         run_or_fail(execute_namespace + ["ip", "addr", "add", ipv4, "dev", device_name])
-    run_or_fail(execute_namespace + ["ip", "addr", "add", ipv6, "dev", device_name])
+    if ipv6 is not None:
+        run_or_fail(execute_namespace + ["ip", "addr", "add", ipv6, "dev", device_name])
     run_or_fail(execute_namespace + ["ip", "link", "set", device_name, "up"])
     run_or_fail(execute_namespace + ["ip", "link", "set", device_name, "mtu", str(mtu)])
     run_or_fail(execute_namespace + ["ip", "route", "add", "default", "dev", device_name])
@@ -1090,14 +1126,15 @@ def write_wpa_supplicant_config(wifi_config):
         log_bad('Could not write configuration: %s (%s)' % (WPA_SUPPLICANT_CONF, str(e)))
 
 
-def path_selection(path: list[str], owned_entry: bool, diskless_entry: bool, uniform_by_country: bool):
-    servers = [
+def path_selection(path: list[str], owned_entry: bool, diskless_entry: bool, uniform_by_country: bool, servers: list = None):
+    selected_path = [
         server_random_choice(
             filter_servers(
                 active=True,
                 owned=owned_entry if owned_entry else None,
                 country_city_hostname=path[0],
                 diskless=diskless_entry if diskless_entry else None,
+                servers=servers,
             ),
             uniform_by_country=uniform_by_country
         )
@@ -1107,29 +1144,54 @@ def path_selection(path: list[str], owned_entry: bool, diskless_entry: bool, uni
             chosen_server = server_random_choice(
                 filter_servers(
                     active=True,
-                    country_city_hostname=country_city_hostname
+                    country_city_hostname=country_city_hostname,
+                    servers=servers,
                 ),
                 uniform_by_country=uniform_by_country
             )
-            if not chosen_server in servers:
-                servers.append(chosen_server)
+            if not chosen_server in selected_path:
+                selected_path.append(chosen_server)
                 break
-    return servers
+    return selected_path
 
 
-def path_configure_hops(servers, without_multihop):
+def get_device_from_group(group_by_provider, server):
+    provider = server['provider']
+    if len(group_by_provider[provider]) == 0:
+        log_fatal('Provider %s has no more devices!' % provider) # TODO: formulate clearer
+    return group_by_provider[provider].pop()
+
+
+def path_configure_hops(config, servers, without_multihop):
     hops = []
+
+    group_by_provider = defaultdict(list)
+    for device in config['devices']:
+        provider = device['provider']
+        group_by_provider[provider].append(device)
 
     if without_multihop:
         for server in servers:
-            hops.append(Hop(server))
+            hops.append(Hop(get_device_from_group(group_by_provider, server), server))
     else:
         idx = 0
         while idx < len(servers) - 1:
-            hops.append(Multihop(servers[idx], servers[idx+1]))
+            has_multihop_support = (
+                'multihop_port' in servers[idx] and
+                'multihop_port' in servers[idx+1] and
+                servers[idx]['provider'] == servers[idx+1]['provider'] and
+                servers[idx]['provider'] == 'mullvad'
+            )
+
+            if has_multihop_support:
+                hops.append(Multihop(get_device_from_group(group_by_provider, servers[idx]), servers[idx], servers[idx+1]))
+            else:
+                hops.append(Hop(get_device_from_group(group_by_provider, servers[idx]), servers[idx]))
+                hops.append(Hop(get_device_from_group(group_by_provider, servers[idx+1]), servers[idx+1]))
+
             idx += 2
         if idx < len(servers):
-            hops.append(Hop(servers[idx]))
+            hops.append(Hop(get_device_from_group(group_by_provider, servers[idx]), servers[idx]))
 
     return hops
 
@@ -1170,6 +1232,7 @@ def create_hop_table(hops, without_multihop, title):
         'Hostname',
         'IP',
         'Port',
+        'Provider',
     ], hrules=hrules)
     table.title = title
     table.align['#'] = 'r'
@@ -1177,6 +1240,7 @@ def create_hop_table(hops, without_multihop, title):
     table.align['City'] = 'l'
     table.align['Hostname'] = 'l'
     table.align['IP'] = 'r'
+    table.align['Provider'] = 'l'
 
     idx = 0
     for hop in hops:
@@ -1187,8 +1251,9 @@ def create_hop_table(hops, without_multihop, title):
             hostname = '%s\n%s' % (hop.entry['hostname']     , hop.exit['hostname'])
             ip       = '%s\n%s' % (hop.entry['ipv4_addr_in'] , hop.exit['ipv4_addr_in'])
             port     = '%d'     % (hop.port())
+            provider = '%s'     % (hop.provider())
 
-            table.add_row([index, country, city, hostname, ip, port])
+            table.add_row([index, country, city, hostname, ip, port, provider])
             idx += 2
         else:
             index    = '%d' % (idx)
@@ -1197,7 +1262,8 @@ def create_hop_table(hops, without_multihop, title):
             hostname = '%s' % (hop.server['hostname'])
             ip       = '%s' % (hop.server['ipv4_addr_in'])
             port     = '%d' % (hop.port())
-            table.add_row([index, country, city, hostname, ip, port])
+            provider = '%s' % (hop.provider())
+            table.add_row([index, country, city, hostname, ip, port, provider])
             idx += 1
 
     return table
@@ -1238,11 +1304,14 @@ def up_command(args, is_default):
     if len(args.COUNTRY_CITY_HOSTNAME) == 0:
         args.COUNTRY_CITY_HOSTNAME = ['w']
 
+    servers = load_servers(config)
+
     servers = path_selection(
         args.COUNTRY_CITY_HOSTNAME,
         owned_entry=args.owned_entry,
         diskless_entry=args.diskless_entry,
-        uniform_by_country=args.uniform_by_country
+        uniform_by_country=args.uniform_by_country,
+        servers=servers
     )
 
     if None in servers:
@@ -1251,8 +1320,14 @@ def up_command(args, is_default):
     if len(servers) != len(args.COUNTRY_CITY_HOSTNAME):
         log_fatal("Could not chose unique servers for all hops! Please try again or use wider filter criteria.")
 
-    hops = path_configure_hops(servers, args.without_multihop)
-    table_hops = create_hop_table(hops, args.without_multihop, title='Hop configuration with nameserver %s' % get_dns_from_args(args))
+    hops = path_configure_hops(config, servers, args.without_multihop)
+
+    if hops[-1].provider() == 'mullvad':
+        dns_server = get_dns_from_args(args)
+    else:
+        dns_server = hops[-1].device['dns']
+
+    table_hops = create_hop_table(hops, args.without_multihop, title='Hop configuration with nameserver %s' % dns_server)
 
     if args.dry_run:
         print(table_hops)
@@ -1284,8 +1359,6 @@ def up_command(args, is_default):
         create_network_namespace(NAMESPACE_HOP % idx)
     namespaces.append(NAMESPACE_ROOT)
 
-    assert len(hops) <= len(config['devices'])
-
     mtu = 1420
     for idx in range(len(hops)):
         ridx = len(hops) - idx - 1
@@ -1293,7 +1366,7 @@ def up_command(args, is_default):
         hop = hops[idx]
         namespace = namespaces[idx]
         namespace_link_to = namespaces[idx+1]
-        device = config['devices'][idx]
+        device = hop.device
         configuration_filename = CONFIGURATION_HOP % ridx
         device_name = DEVICE_NAME_HOP % ridx
         ipv4 = device['ipv4']
@@ -1332,7 +1405,7 @@ def up_command(args, is_default):
         if device[0] != DeviceType.Virtual:
             device_move_to_physical(device)
 
-    update_resolvconf(get_dns_from_args(args))
+    update_resolvconf(dns_server)
 
     if not is_default and config and not args.dont_save:
         config = config_save_up_command(config, args)
@@ -1776,6 +1849,8 @@ def rotate_command(args, up_command_defaults):
     config = request_login_api(args, account_number, config)
 
     for device in config.get('devices', []):
+        if not device['provider'] == 'mullvad':
+            continue
         private_key, peer = request_update_public_key(config, device)
         device['private_key'] = private_key
         device['ipv4'] = peer['ipv4_address']
@@ -1851,13 +1926,13 @@ def update_command(args):
         response = requests.get(url_servers)
 
         if response.ok:
-            with open(SERVERS, 'w') as servers:
+            with open(MULLVAD_SERVERS, 'w') as servers:
                 servers.write(response.text)
-            os.chmod(SERVERS, 0o644)
+            os.chmod(MULLVAD_SERVERS, 0o644)
             servers = filter_servers()
             check_unique_city_codes(servers)
             check_special_country_codes_not_in_use(servers)
-            log_info('%s updated with %d wireguard servers' % (SERVERS, len(servers)))
+            log_info('%s updated with %d wireguard servers' % (MULLVAD_SERVERS, len(servers)))
         else:
             log_warn('Can not download servers from %s, because of %s' % (url_servers, response.text))
     except Exception as e:

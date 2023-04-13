@@ -239,8 +239,7 @@ $ # vad down
 
 ## TODOs
 
-* [X] Execute `vad down` if `vad up` fails on the critical path
-* [X] Revise wireguard namespace creation
+* [ ] Terminology is a bit confusing at the moment, e.g. we use "device" for linux interfaces and Mullvad devices. (Rename "devices" to "peers")
 * [ ] Add command `vad add` instead of `vad init -a`
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until it down.
 * [ ] Integration testing with Vagrant
@@ -250,7 +249,6 @@ $ # vad down
 * [ ] Fix double configuration due to `wpa_supplicant`
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
-* [ ] Terminology is a bit confusing at the moment, e.g. we use "device" for linux interfaces and Mullvad devices.
 * [ ] Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible).
   ```sh
   $ vad port 22      # map one port from the exit server to the local port 22
@@ -263,19 +261,6 @@ $ # vad down
   Add a `--volatile` flag to this command to automatically delete this port on down or partial down.
   Ports mapping may not survive a up/down or partial up/down, because the exit can change!
   If the port mappings already exist this command is a no-op.
-* [ ] Add support for private/external WireGuard servers.
-  A server is split into a "device" and a "server".
-  A device has the following attributes: `private_key`, `ipv4` and `ipv6`.
-  A server has has at least the following attributes: `public_key`, `ipv4`, and `ipv6`.
-  These devices would have four additional attributes: `endpoint_ipv4`, `endpoint_ipv6`, `endpoint_public_key` and `endpoint_hostname`.
-  Hostname does not need to be a real hostname.
-  Basically these devices have only one endpoint.
-  This devices could be selected via the hostname in the up command, e.g.
-  ```
-  $ vad up de dysnomia de
-  ```
-  The hostname search order needs to change to private-external-devices and then Mullvad servers.
-  This makes the configuration step more complicated, is it worth it?
 * [ ] Use type hinting in conjunction with `mypy`.
   Instead of making python more statically typed it is a better idea to reimplement it in a statically typed language.
 
