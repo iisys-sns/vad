@@ -24,13 +24,14 @@ from collections import defaultdict
 from collections import Counter
 from datetime import datetime
 from enum import Enum
-from prettytable import PrettyTable
+from prettytable import PrettyTable, ALL, NONE, FRAME
 
 import inspect
 from io import StringIO
 from requests import Response
 from contextlib import redirect_stdout
 from functools import partial
+from dataclasses import dataclass
 
 
 VERBOSE = False
@@ -53,10 +54,54 @@ EUROPE_UNION = ["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de"
 EUROPE_CONTINENT = EUROPE_UNION + ["is", "no", "li", "ch", "uk", "gb", "me", "mk", "al", "rs", "tr", "ba", "xk", "am", "az", "by", " md", "ge", "ua"]
 
 
+class PrettyTablePretty(PrettyTable):
+    def __init__(self, field_names=None, **kwargs) -> None:
+        super().__init__(field_names, **kwargs)
+        # source: https://github.com/ITGlobal/CLI/blob/master/src/CLI.Table/Impl/PrettyGridTableStyleImpl.cs
+        self.vertical_char = '│'
+        self.horizontal_char = '─'
+        self.top_left_junction_char = '┌'
+        self.top_right_junction_char = '┐'
+        self.bottom_left_junction_char = '└'
+        self.bottom_right_junction_char = '┘'
+        self.right_junction_char = '┤'
+        self.left_junction_char = '├'
+        self.bottom_junction_char = '┴'
+        self.top_junction_char = '┬'
+        self.junction_char = '┼'
+
+
 class DeviceType(Enum):
     Ethernet = 1
     Wifi = 2
     Virtual = 3
+
+
+@dataclass
+class Multihop:
+    entry: dict
+    exit: dict
+    def pubkey(self):
+        return self.exit['pubkey']
+    def ipv4(self):
+        return self.entry['ipv4_addr_in']
+    def ipv6(self):
+        return self.entry['ipv6_addr_in']
+    def port(self):
+        return int(self.exit['multihop_port'])
+
+
+@dataclass
+class Hop:
+    server: dict
+    def pubkey(self):
+        return self.server['pubkey']
+    def ipv4(self):
+        return self.server['ipv4_addr_in']
+    def ipv6(self):
+        return self.server['ipv6_addr_in']
+    def port(self):
+        return 51820
 
 
 def nop_colored(text, *args, **kwargs):
@@ -94,7 +139,7 @@ def become_root(do_lock=True):
     if os.geteuid() != 0:
         os.execvp("sudo", ["sudo", "-E"] + sys.argv)
 
-    # NOTE: Everytime we become root, we want usually to do some atomic
+    # NOTE: Everytime we become root, we want usually do some atomic
     # operation, to prevent race conditions, we want to serialize the execution with
     # a file lock
     if do_lock:
@@ -206,10 +251,12 @@ def device_move_to_physical(device):
     run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "dhcpcd", "-b", dev])
 
 
-def write_wireguard_config(device_index, device, public_key, address, port=51820):
+def write_wireguard_config(configuration_filename, private_key, public_key, address, port=51820):
+    log_verbose("Create wireguard config: %s" % configuration_filename)
+
     wireguard_config = f"""
         [Interface]
-        PrivateKey = {device['private_key']}
+        PrivateKey = {private_key}
 
         [Peer]
         PublicKey = {public_key}
@@ -220,14 +267,10 @@ def write_wireguard_config(device_index, device, public_key, address, port=51820
     wireguard_config = wireguard_config.strip()
     wireguard_config = '\n'.join([line.strip() for line in wireguard_config.split('\n')])
 
-    configuration_filename = CONFIGURATION_HOP % device_index
-    log_verbose("Create wireguard config: %s" % configuration_filename)
     if os.path.exists(configuration_filename):
         log_fatal("Configuration %s already exists!" % configuration_filename)
     with open(configuration_filename, 'w') as c:
         c.write(wireguard_config)
-
-    return configuration_filename, DEVICE_NAME_HOP % device_index, device['ipv4'], device['ipv6']
 
 
 def update_resolvconf(dns):
@@ -362,7 +405,7 @@ def request_account_number(passname, config):
         account_number = input("Please enter your Mullvad account number (with or w/o spaces): ")
         account_number = account_number.replace(" ", "")
         if verify_account_number(account_number):
-            print("The account number must be have 12, 13 or 16 digits!")
+            print("The account number must have 12, 13 or 16 digits!")
             continue
         return account_number
 
@@ -652,7 +695,7 @@ def init_command(args):
             log_fatal('Your account is expired (since %s)!' % account['expires'])
 
         if not account['can_add_wg_peers']:
-            log_fatal('You can not add more devices, account is full!' )
+            log_fatal('You can not add more devices to your account, your account is full!' )
 
         private_key, peer = request_add_key(login)
 
@@ -781,7 +824,7 @@ def print_peer_table(peers, this_peers, show_ipv6, show_device_id):
 
     fields.extend(['Public Key', 'Can Add Ports', 'Ports', 'City Ports'])
 
-    table = PrettyTable(fields)
+    table = PrettyTablePretty(fields)
 
     table.align['Name'] = 'l'
     table.align['IPv4'] = 'r'
@@ -873,7 +916,6 @@ def show_command(args):
     if is_active():
         try:
             with open(DESCRIPTION) as desc:
-                log_info('Configuration:', highlight=True)
                 print(desc.read().strip())
                 print()
                 sys.stdout.flush()
@@ -905,16 +947,20 @@ def get_dns_from_args(args):
         return get_dns_server_from_flags(args.dns[0])
 
 
-def setup_wireguard_device(namespace_new, namespace_link_to, device_name, config_filename, ipv4, ipv6, mtu, only_use_ipv6):
-    update_physical_namespace = network_namespace_exists(NAMESPACE_PHYSICAL) and namespace_new == NAMESPACE_PHYSICAL
+def create_network_namespace(namespace_new):
+    log_verbose(f"Create namespace %s" % namespace_new)
+    run_or_fail(["ip", "netns", "add", namespace_new])
+    run_or_fail(["ip", "-n", namespace_new, "link", "set", "lo", "up"])
+    # NOTE: allow "ping" command for all user groups in the physical namespace
+    run_or_fail(["ip", "netns", "exec", namespace_new, "sysctl", 'net.ipv4.ping_group_range=0 2147483647'])
 
-    if update_physical_namespace:
-        prefix = 'Update'
-    else:
-        prefix = 'Create'
 
-    log_verbose(f"{prefix} namespace %s and link to %s (device=%s, ipv4=%s, ipv6=%s, mtu=%s)" % (
-        namespace_new,
+def setup_wireguard_device(namespace, namespace_link_to, device_name, config_filename, ipv4, ipv6, mtu, only_use_ipv6):
+    namespace_link_to_text = namespace_link_to
+    if namespace_link_to == NAMESPACE_ROOT:
+        namespace_link_to_text = 'root'
+    log_verbose(f"Setup wireguard device in namespace %s and move to namespace %s (device=%s, ipv4=%s, ipv6=%s, mtu=%s)" % (
+        namespace,
         namespace_link_to,
         device_name,
         ipv4,
@@ -922,18 +968,11 @@ def setup_wireguard_device(namespace_new, namespace_link_to, device_name, config
         mtu
     ))
 
-    if not update_physical_namespace:
-        run_or_fail(["ip", "netns", "add", namespace_new])
-        run_or_fail(["ip", "-n", namespace_new, "link", "set", "lo", "up"])
-        # NOTE: allow "ping" command for all user groups in the physical namespace
-        run_or_fail(["ip", "netns", "exec", namespace_new, "sysctl", 'net.ipv4.ping_group_range=0 2147483647'])
+    run_or_fail(["ip", "-n", namespace, "link", "add", device_name, "type", "wireguard"])
+    run_or_fail(["ip", "-n", namespace, "link", "set", device_name, "netns", namespace_link_to])
 
-    run_or_fail(["ip", "-n", namespace_new, "link", "add", device_name, "type", "wireguard"])
-    run_or_fail(["ip", "-n", namespace_new, "link", "set", device_name, "netns", namespace_link_to])
-
-    if namespace_link_to == NAMESPACE_ROOT:
-        execute_namespace = []
-    else:
+    execute_namespace = []
+    if namespace_link_to != NAMESPACE_ROOT:
         execute_namespace = ["ip", "netns", "exec", namespace_link_to]
 
     run_or_fail(execute_namespace + ["wg", "setconf", device_name, config_filename])
@@ -1050,6 +1089,119 @@ def write_wpa_supplicant_config(wifi_config):
         log_bad('Could not write configuration: %s (%s)' % (WPA_SUPPLICANT_CONF, str(e)))
 
 
+def path_selection(path: list[str], owned_entry: bool, diskless_entry: bool, uniform_by_country: bool):
+    servers = [
+        server_random_choice(
+            filter_servers(
+                active=True,
+                owned=owned_entry if owned_entry else None,
+                country_city_hostname=path[0],
+                diskless=diskless_entry if diskless_entry else None,
+            ),
+            uniform_by_country=uniform_by_country
+        )
+    ]
+    for country_city_hostname in path[1:]:
+        for _ in range(10):
+            chosen_server = server_random_choice(
+                filter_servers(
+                    active=True,
+                    country_city_hostname=country_city_hostname
+                ),
+                uniform_by_country=uniform_by_country
+            )
+            if not chosen_server in servers:
+                servers.append(chosen_server)
+                break
+    return servers
+
+
+def path_configure_hops(servers, without_multihop):
+    hops = []
+
+    if without_multihop:
+        for server in servers:
+            hops.append(Hop(server))
+    else:
+        idx = 0
+        while idx < len(servers) - 1:
+            hops.append(Multihop(servers[idx], servers[idx+1]))
+            idx += 2
+        if idx < len(servers):
+            hops.append(Hop(servers[idx]))
+
+    return hops
+
+
+def path_describe(servers, without_multihop):
+    if len(servers) % 2 != 0:
+        i = iter(servers[1:])
+    else:
+        i = iter(servers)
+
+    description = []
+
+    if without_multihop:
+        for server in reversed(servers):
+            description.insert(0, describe_server(server) + " [Tunnel]")
+    else:
+        for left, right in reversed(list(zip(i, i))):
+            description.insert(0, describe_server(right))
+            description.insert(0, describe_server(left) + " [Multihop]")
+        if len(servers) % 2 != 0:
+            description.insert(0, describe_server(servers[0]) + " [Tunnel]")
+
+    description[-1] += ' [Exit]'
+    d = description
+    description = '- ' + '\n- '.join(description)
+
+    return description, d
+
+
+def create_hop_table(hops, without_multihop, title):
+    hrules=ALL
+    if without_multihop:
+        hrules=FRAME
+    table = PrettyTablePretty([
+        '#',
+        'Country',
+        'City',
+        'Hostname',
+        'IP',
+        'Port',
+    ], hrules=hrules)
+    table.title = title
+    table.align['#'] = 'r'
+    table.align['Country'] = 'l'
+    table.align['City'] = 'l'
+    table.align['Hostname'] = 'l'
+    table.align['IP'] = 'r'
+
+    idx = 0
+    for hop in hops:
+        if isinstance(hop, Multihop):
+            index    = '%d\n%d' % (idx, idx+1)
+            country  = '%s\n%s' % (hop.entry['country_name'] , hop.exit['country_name'])
+            city     = '%s\n%s' % (hop.entry['city_name']    , hop.exit['city_name'])
+            hostname = '%s\n%s' % (hop.entry['hostname']     , hop.exit['hostname'])
+            ip       = '%s\n%s' % (hop.entry['ipv4_addr_in'] , hop.exit['ipv4_addr_in'])
+            port     = '%d'     % (hop.port())
+
+            table.add_row([index, country, city, hostname, ip, port])
+            idx += 2
+        else:
+            index    = '%d' % (idx)
+            country  = '%s' % (hop.server['country_name'])
+            city     = '%s' % (hop.server['city_name'])
+            hostname = '%s' % (hop.server['hostname'])
+            ip       = '%s' % (hop.server['ipv4_addr_in'])
+            port     = '%d' % (hop.port())
+            table.add_row([index, country, city, hostname, ip, port])
+            idx += 1
+
+    return table
+
+
 def up_command(args, is_default):
     become_root()
 
@@ -1085,29 +1237,12 @@ def up_command(args, is_default):
     if len(args.COUNTRY_CITY_HOSTNAME) == 0:
         args.COUNTRY_CITY_HOSTNAME = ['w']
 
-    servers = [
-        server_random_choice(
-            filter_servers(
-                active=True,
-                owned=args.owned_entry if args.owned_entry else None,
-                country_city_hostname=args.COUNTRY_CITY_HOSTNAME[0],
-                diskless=args.diskless_entry if args.diskless_entry else None,
-            ),
-            uniform_by_country=args.uniform_by_country
-        )
-    ]
-    for country_city_hostname in args.COUNTRY_CITY_HOSTNAME[1:]:
-        for _ in range(10):
-            chosen_server = server_random_choice(
-                filter_servers(
-                    active=True,
-                    country_city_hostname=country_city_hostname
-                ),
-                uniform_by_country=args.uniform_by_country
-            )
-            if not chosen_server in servers:
-                servers.append(chosen_server)
-                break
+    servers = path_selection(
+        args.COUNTRY_CITY_HOSTNAME,
+        owned_entry=args.owned_entry,
+        diskless_entry=args.diskless_entry,
+        uniform_by_country=args.uniform_by_country
+    )
 
     if None in servers:
         log_fatal('Filter criteria "%s" does not return any server!' %  args.COUNTRY_CITY_HOSTNAME[servers.index(None)])
@@ -1115,38 +1250,18 @@ def up_command(args, is_default):
     if len(servers) != len(args.COUNTRY_CITY_HOSTNAME):
         log_fatal("Could not chose unique servers for all hops! Please try again or use wider filter criteria.")
 
-    if len(servers) % 2 != 0:
-        i = iter(servers[1:])
-    else:
-        i = iter(servers)
-
-    description = []
-    if not args.without_multihop:
-        for left, right in reversed(list(zip(i, i))):
-            description.insert(0, describe_server(right))
-            description.insert(0, describe_server(left) + " [Multihop]")
-        if len(servers) % 2 != 0:
-            description.insert(0, describe_server(servers[0]) + " [Tunnel]")
-    else:
-        for server in reversed(servers):
-            description.insert(0, describe_server(server) + " [Tunnel]")
-
-    description[-1] += ' [Exit]'
-    description.append('with nameserver %s' % get_dns_from_args(args))
-    description = '- ' + '\n- '.join(description)
+    hops = path_configure_hops(servers, args.without_multihop)
+    table_hops = create_hop_table(hops, args.without_multihop, title='Hop configuration with nameserver %s' % get_dns_from_args(args))
 
     if args.dry_run:
-        log_info("Would configure:", highlight=True)
-        print(description)
+        print(table_hops)
         sys.exit(0)
 
-    physical_already_existed = network_namespace_exists(NAMESPACE_PHYSICAL)
-
-    was_already_active = is_active()
-
-    if was_already_active:
+    if is_active():
         log_verbose("Was already active, do a partial tear down.")
         config = down_command(Namespace(config=args.config, partial=True))
+
+    physical_already_existed = network_namespace_exists(NAMESPACE_PHYSICAL)
 
     if not physical_already_existed:
         if args.auto_configure_wifi:
@@ -1155,59 +1270,44 @@ def up_command(args, is_default):
                 write_wpa_supplicant_config(wifi_config)
         config_execute_commands(config, 'pre_up')
 
-    log_info("Configure:", highlight=True)
-    print(description)
-
+    print(table_hops)
     with open(DESCRIPTION, 'w') as c:
-        c.write(f"{description}\n")
+        c.write(f"{table_hops}\n")
 
-    if len(servers) % 2 != 0:
-        i = iter(servers[1:])
-    else:
-        i = iter(servers)
+    namespaces = []
+    namespaces.append(NAMESPACE_PHYSICAL)
+    if not network_namespace_exists(NAMESPACE_PHYSICAL):
+        create_network_namespace(NAMESPACE_PHYSICAL)
+    for idx in range(1, len(hops)):
+        namespaces.insert(1, NAMESPACE_HOP % idx)
+        create_network_namespace(NAMESPACE_HOP % idx)
+    namespaces.append(NAMESPACE_ROOT)
 
-    configurations = []
-    namespaces = [NAMESPACE_ROOT]
-    devices = iter(enumerate(config['devices']))
-    if not args.without_multihop:
-        for left, right in reversed(list(zip(i, i))):
-            idx, device = next(devices)
-            namespaces.insert(1, NAME + str(idx))
-            configurations.append(write_wireguard_config(
-                device_index=idx,
-                device=device,
-                public_key=right['pubkey'],
-                address=left['ipv6_addr_in'] if args.only_use_ipv6 else left['ipv4_addr_in'],
-                port=int(right['multihop_port'])
-            ))
-        if len(servers) % 2 != 0:
-            idx, device = next(devices)
-            namespaces.insert(1, NAME + str(idx))
-            configurations.append(write_wireguard_config(
-                device_index=idx,
-                device=device,
-                public_key=servers[0]['pubkey'],
-                address=servers[0]['ipv6_addr_in'] if args.only_use_ipv6 else servers[0]['ipv4_addr_in'],
-            ))
-    else:
-        for server in reversed(servers):
-            idx, device = next(devices)
-            namespaces.insert(1, NAME + str(idx))
-            configurations.append(write_wireguard_config(
-                device_index=idx,
-                device=device,
-                public_key=server['pubkey'],
-                address=server['ipv6_addr_in'] if args.only_use_ipv6 else server['ipv4_addr_in'],
-            ))
+    assert len(hops) <= len(config['devices'])
 
-    namespaces[-1] = NAMESPACE_PHYSICAL
+    mtu = 1420
+    for idx in range(len(hops)):
+        ridx = len(hops) - idx - 1
 
-    for idx, (configuration_filename, device_name, ipv4, ipv6) in enumerate(configurations):
-        namespace_new = namespaces[idx + 1]
-        namespace_link_to = namespaces[idx]
-        mtu = 1420 - (80 * (len(configurations) - idx - 1))
+        hop = hops[idx]
+        namespace = namespaces[idx]
+        namespace_link_to = namespaces[idx+1]
+        device = config['devices'][idx]
+        configuration_filename = CONFIGURATION_HOP % ridx
+        device_name = DEVICE_NAME_HOP % ridx
+        ipv4 = device['ipv4']
+        ipv6 = device['ipv6']
+
+        write_wireguard_config(
+            configuration_filename,
+            private_key=device['private_key'],
+            public_key=hop.pubkey(),
+            address=hop.ipv6() if args.only_use_ipv6 else hop.ipv4(),
+            port=hop.port()
+        )
+
         setup_wireguard_device(
-            namespace_new,
+            namespace,
             namespace_link_to,
             device_name,
             configuration_filename,
@@ -1218,6 +1318,8 @@ def up_command(args, is_default):
             # args.only_use_ipv6,
             # TODO: Why does IPv6 only not work?
         )
+
+        mtu -= 80
 
     if not physical_already_existed:
         run(["timeout", "-s", "KILL", "5", "killall", "-w", "wpa_supplicant", "dhcpcd"], failure_ok=True)
@@ -1259,9 +1361,8 @@ def remove_linked_device(namespace_to_remove, namespace_linked_to, device_name):
         run(['ip', '-n', namespace_linked_to, 'link', 'del', device_name])
 
 
-def remove_network_namespace(namespace_to_remove, namespace_linked_to, device_name):
-    log_verbose("Remove network namespace %s which is linked to %s" % (namespace_to_remove, namespace_linked_to))
-
+def remove_network_namespace(namespace_to_remove):
+    log_verbose("Remove network namespace %s" % (namespace_to_remove))
     process = run(['ip', 'netns', 'pids', namespace_to_remove], failure_ok=True)
     if process.returncode == 0:
         pids = str(process.stdout, 'utf8')
@@ -1326,9 +1427,7 @@ def down_command(args):
                 continue
 
             remove_network_namespace(
-                namespace_to_remove=namespaces[idx],
-                namespace_linked_to=namespaces[idx-1],
-                device_name=interface_name,
+                namespace_to_remove=namespaces[idx]
             )
 
     if (config and not args.partial):
@@ -1369,7 +1468,7 @@ def list_command(args):
             key = (server['country_code'], server['country_name'])
             countries[key] += 1
 
-        table = PrettyTable(['Count', 'Code', 'Country'])
+        table = PrettyTablePretty(['Count', 'Code', 'Country'])
         table.align['Count'] = 'r'
         table.align['Country'] = 'l'
         for (country_code, country_name), count in sorted(countries.items(), key=lambda k: k[1]):
@@ -1384,7 +1483,7 @@ def list_command(args):
             )
             country_cities[key] += 1
 
-        table = PrettyTable(['Count', '', 'Country', 'Code', 'City'])
+        table = PrettyTablePretty(['Count', '', 'Country', 'Code', 'City'])
         table.align['Count'] = 'r'
         table.align['Country'] = 'l'
         table.align['City'] = 'l'
@@ -1399,7 +1498,7 @@ def list_command(args):
             )
             providers[key] += 1
 
-        table = PrettyTable(['Count', 'Provider'])
+        table = PrettyTablePretty(['Count', 'Provider'])
         table.align['Count'] = 'r'
         table.align['Provider'] = 'l'
         for (provider), count in sorted(providers.items(), key=lambda k: k[1]):
@@ -1431,7 +1530,7 @@ def list_command(args):
         if args.show_column_status_messages:
             fields.append('Messages')
 
-        table = PrettyTable(fields)
+        table = PrettyTablePretty(fields)
         table.align['Country'] = 'l'
         table.align['City'] = 'l'
         table.align['Provider'] = 'l'
@@ -2249,7 +2348,7 @@ def vad():
     list.add_argument('-r', '--rented', dest='owned', action='store_false', help='Filter by rented servers.', default=None)
     list.add_argument('-a', '--active', dest='active', action='store_true', help='Filter by active servers.', default=None)
     list.add_argument('-i', '--inactive', dest='active', action='store_false', help='Filter by inactive servers.', default=None)
-    list.add_argument('-b', '--diskless', action='store_true', help='Filter by diskless boot servers (stboot [BETA]).', default=None)
+    list.add_argument('-b', '--diskless', action='store_true', help='Filter by diskless boot servers.', default=None)
     list.set_defaults(func=list_command)
 
     service = subparsers.add_parser('service', help='Install and remove services and timers.')

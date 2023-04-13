@@ -239,13 +239,14 @@ $ # vad down
 
 ## TODOs
 
-* [ ] Revise wireguard namespace creation
+* [X] Execute `vad down` if `vad up` fails on the critical path
+* [X] Revise wireguard namespace creation
+* [ ] Add command `vad add` instead of `vad init -a`
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until it down.
 * [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
 * [ ] Implement a configuration class and api request class
 * [ ] Test if dependencies are installed while launching
-* [ ] Execute `vad down` if `vad up` fails on the critical path
 * [ ] Fix double configuration due to `wpa_supplicant`
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
