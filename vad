@@ -93,6 +93,7 @@ class Multihop:
     def port(self):
         assert 'multihop_port' in self.entry
         assert 'multihop_port' in self.exit
+        assert self.entry['provider'] == 'mullvad'
         return int(self.exit['multihop_port'])
     def provider(self):
         return self.entry['provider']
