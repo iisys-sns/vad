@@ -1417,8 +1417,6 @@ def up_command(args, is_default):
     run(['systemctl', 'unmask', 'vad.move@.service'])
     log_success("VPN is successfully up!")
 
-    print_status_connected()
-
     return config
 
 
@@ -1758,7 +1756,7 @@ def service_config():
     )
 
 
-def service_install_command(args):
+def install_command(args):
     become_root()
 
     config = service_config()
@@ -1806,7 +1804,7 @@ def service_install_command(args):
     log_success("Successfully installed udev rule, services and timers!")
 
 
-def service_remove_command(args):
+def uninstall_command(args):
     become_root()
 
     config = service_config()
@@ -1871,7 +1869,7 @@ def rotate_command(args, up_command_defaults):
 def reset_command(args):
     become_root()
 
-    service_remove_command(Namespace())
+    uninstall_command(Namespace())
 
     config = delete_command(Namespace(config=args.config, all=True, INDEX=None, passname='web/mullvad'))
 
@@ -2430,13 +2428,11 @@ def vad():
     list.add_argument('-b', '--diskless', action='store_true', help='Filter by diskless boot servers.', default=None)
     list.set_defaults(func=list_command)
 
-    service = subparsers.add_parser('service', help='Install and remove services and timers.')
-    service_subparser = service.add_subparsers()
-    service_install = service_subparser.add_parser('install', aliases=['i'], help='Installs a service which automatically starts the VPN on system startup and tears it down on system shutdown. A udev rule move new network devices into physical namespace and automatically creates it if it does not exists. A timer will rotate WireGuard keys every 4 days (same as the Mullvad app).')
-    service_install.set_defaults(func=service_install_command)
-    service_remove = service_subparser.add_parser('remove', aliases=['rm'], help='Removes all installed services.')
-    service_remove.set_defaults(func=service_remove_command)
-    service.set_defaults(func=lambda args: service.print_help())
+    install = subparsers.add_parser('install', aliases=['in'], help='Installs a service which automatically starts the VPN on system startup and tears it down on system shutdown. A udev rule move new network devices into physical namespace and automatically creates it if it does not exists. A timer will rotate WireGuard keys every 4 days (same as the Mullvad app).')
+    install.set_defaults(func=install_command)
+
+    uninstall = subparsers.add_parser('uninstall', aliases=['un'], help='Uninstalles all services.')
+    uninstall.set_defaults(func=uninstall_command)
 
     move = subparsers.add_parser('move', aliases=['mv'], help='Move device into physical namespace and if it does not exist create it.')
     move.add_argument('INTERFACE', nargs=1, help='Interface name that will be moved.')

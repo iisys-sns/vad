@@ -232,7 +232,7 @@ Reset:
 $ vad reset
 $ # Corresponds to the following commands, but additonally deletes account-related information from the configuration file.
 $ # vad delete --all
-$ # vad service rm
+$ # vad uninstall
 $ # vad down
 ```
 
@@ -241,8 +241,6 @@ $ # vad down
 * [ ] Terminology is a bit confusing at the moment, e.g. we use "device" for linux interfaces and Mullvad devices. (Rename "devices" to "peers")
 * [ ] Add command `vad add` instead of `vad init -a`
 * [ ] Support adding external devices with `vad add`
-* [ ] Rename `vad service install` to `vad install`
-* [ ] Rename `vad service remove` to `vad uninstall`
 * [ ] Remove `vad dev`. Replace with `setns()` and `mount`.
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until it down.
 * [ ] Integration testing with Vagrant
