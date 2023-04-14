@@ -84,7 +84,7 @@ class DeviceType(Enum):
 
 @dataclass
 class Multihop:
-    device: dict
+    peer: dict
     entry: dict
     exit: dict
     def pubkey(self):
@@ -104,7 +104,7 @@ class Multihop:
 
 @dataclass
 class Hop:
-    device: dict
+    peer: dict
     server: dict
     def pubkey(self):
         return self.server['pubkey']
@@ -373,8 +373,8 @@ def get_dns_server_from_flags(flags):
 
 def load_servers(config):
     providers = set(['mullvad'])
-    for device in config['devices']:
-        providers.add(device['provider'])
+    for peer in config['peers']:
+        providers.add(peer['provider'])
 
     if len(providers) == 0:
         log_fatal('%s does not exists, please use `vad update`, `vad up --update-server-list` or `vad init`.' % MULLVAD_SERVERS)
@@ -580,10 +580,10 @@ def request_add_key(login):
     return (private_key, peer)
 
 
-def request_update_public_key(config, device):
-    assert device['provider'] == 'mullvad'
+def request_update_public_key(config, peer):
+    assert peer['provider'] == 'mullvad'
 
-    if not 'device_id' in device:
+    if not 'peer_id' in peer:
         return
 
     private_key = generate_private_key()
@@ -592,7 +592,7 @@ def request_update_public_key(config, device):
     try:
         log_verbose('request update public key...', end='')
         response = requests.put(
-            "https://api.mullvad.net/accounts/v1/devices/%s/pubkey" % device['device_id'],
+            "https://api.mullvad.net/accounts/v1/devices/%s/pubkey" % peer['peer_id'],
             headers=dict(
                 Authorization='Bearer %s' % config['auth']['api_token']
             ),
@@ -602,7 +602,7 @@ def request_update_public_key(config, device):
         )
         log_verbose('%s' % response.status_code)
     except Exception as e:
-        log_fatal("Error while sending request to update public key for device %s (%s)!" % (device['device_id'], str(e)))
+        log_fatal("Error while sending request to update public key for peer %s (%s)!" % (peer['peer_id'], str(e)))
     if not response.ok:
         log_fatal("Could not update public key to account (%d:%s)!" % (response.status_code, response.text))
 
@@ -748,14 +748,14 @@ def init_command(args):
     config = config_load(args.config)
 
     if isinstance(config, dict):
-        if not 'devices' in config:
-            config['devices'] = []
-        if not args.add_device and len(config['devices']) > 0:
-            log_fatal('Already initialized with at least one device. If you want to add a new device, use `--add-device`.')
+        if not 'peers' in config:
+            config['peers'] = []
+        if not args.add_peer and len(config['peers']) > 0:
+            log_fatal('Already initialized with at least one peer. If you want to add a new peer, use `--add-peer`.')
     else:
-        config = dict(devices=[])
+        config = dict(peers=[])
 
-    if len(config['devices']) == 0:
+    if len(config['peers']) == 0:
         update_command(None)
 
     account_number = request_account_number(args.passname, config)
@@ -768,20 +768,20 @@ def init_command(args):
             log_fatal('Your account is expired (since %s)!' % account['expires'])
 
         if not account['can_add_wg_peers']:
-            log_fatal('You can not add more devices to your account, your account is full!' )
+            log_fatal('You can not add more peers to your account, your account is full!' )
 
         private_key, peer = request_add_key(login)
 
         account = request_account(login)
 
-        for device in account['account']['wg_peers']:
-            if device['key']['public'] == peer['key']['public']:
-                config['devices'].append(dict(
+        for peer in account['account']['wg_peers']:
+            if peer['key']['public'] == peer['key']['public']:
+                config['peers'].append(dict(
                     private_key=private_key,
                     ipv4=peer['ipv4_address'],
                     ipv6=peer['ipv6_address'],
-                    device_id=device['device_id'],
-                    device_name=device['device_name'],
+                    peer_id=peer['device_id'],
+                    peer_name=peer['device_name'],
                     provider='mullvad',
                 ))
                 break
@@ -794,10 +794,10 @@ def init_command(args):
 
         config = config_save(args.config, config)
 
-        if len(config['devices']) == 1:
-            log_info('First device added (you can now use `vad up`)')
+        if len(config['peers']) == 1:
+            log_info('First peer added (you can now use `vad up`)')
         else:
-            log_info('New device added')
+            log_info('New peer added')
     finally:
         request_logout(login)
 
@@ -813,25 +813,25 @@ def delete_command(args):
         log_warn('Specify a INDEX or use `--all`')
         raise Abort()
     elif args.all:
-        devices = config['devices']
+        peers = config['peers']
     else:
         index = int(args.INDEX[0])
-        if index < len(config['devices']):
-            device = config['devices'][index]
-            devices = [device]
+        if index < len(config['peers']):
+            peer = config['peers'][index]
+            peers = [peer]
         else:
-            log_warn('Device with index %d does not exists!' % index)
+            log_warn('Peer with index %d does not exists!' % index)
             return
 
     account_number = request_account_number(args.passname, config)
     login = request_login(account_number)
 
     try:
-        for device in devices:
-            public_key = get_public_key(device['private_key'])
+        for peer in peers:
+            public_key = get_public_key(peer['private_key'])
             request_revoke_key(login, public_key)
-            config['devices'].remove(device)
-            log_info("Deleted device %s (index %d)!" % (public_key, index))
+            config['peers'].remove(peer)
+            log_info("Deleted peer %s (index %d)!" % (public_key, index))
         config = config_save(args.config, config)
     finally:
         request_logout(login)
@@ -855,9 +855,9 @@ def get_public_key(private_key):
     return str(stdout, 'utf8').strip()
 
 
-def get_this_peer(device, login):
-    if device is not None:
-        public_key = get_public_key(device['private_key'])
+def get_this_peer(peer, login):
+    if peer is not None:
+        public_key = get_public_key(peer['private_key'])
         for wg_peer in login['account']['wg_peers']:
             if wg_peer['key']['public'] == public_key:
                 return wg_peer
@@ -871,12 +871,12 @@ def get_city_ports(city_ports):
     return ports
 
 
-def print_peer_table(peers, this_peers, show_ipv6, show_device_id):
+def print_peer_table(peers, this_peers, show_ipv6, show_peer_id):
     add_peer = lambda current, peer: table.add_row([
             current,
             '✓' if peer['app'] else '',
             peer['created']] +
-            ([peer['device_id']] if show_device_id else []) +
+            ([peer['device_id']] if show_peer_id else []) +
             [peer['device_name'].title(),
             peer['ipv4_address']] +
             ([peer['ipv6_address']] if show_ipv6 else []) +
@@ -888,7 +888,7 @@ def print_peer_table(peers, this_peers, show_ipv6, show_device_id):
 
     fields = ['Index','By App', 'Created']
 
-    if show_device_id:
+    if show_peer_id:
         fields.append('ID')
 
     fields.extend(['Name', 'IPv4'])
@@ -923,9 +923,9 @@ def info_command(args, parser_up):
     try:
         peers = []
         if config:
-            for device in config['devices']:
-                peer = get_this_peer(device, login)
-                peers.append(peer)
+            for peer in config['peers']:
+                peer_mullvad = get_this_peer(peer, login)
+                peers.append(peer_mullvad)
 
         if args.raw:
             for peer in peers:
@@ -955,12 +955,12 @@ def info_command(args, parser_up):
 
             print('Subscription: %s' % account['subscription'])
 
-            print('Devices: ', end='')
-            devices = '%s/%s' % (len(account['wg_peers']), account['max_wg_peers'])
+            print('Peers: ', end='')
+            peers_text = '%s/%s' % (len(account['wg_peers']), account['max_wg_peers'])
             if account['can_add_wg_peers']:
-                log_good(devices)
+                log_good(peers_text)
             else:
-                log_warn(devices)
+                log_warn(peers_text)
 
             print('Ports: ', end='')
             ports = '%s/%s' % (len(account['ports']), account['max_ports'])
@@ -972,14 +972,14 @@ def info_command(args, parser_up):
             for city_port in account['city_ports']:
                 print('- %s-%s' % (city_port['city_code'], city_port['port']))
             print()
-            print_peer_table(account['wg_peers'], peers, args.show_ipv6, args.show_device_ids)
+            print_peer_table(account['wg_peers'], peers, args.show_ipv6, args.show_peer_ids)
             print()
             log_info('If you only call `vad up` this command will be executed: ', end='')
             print(config_rebuild_up_command(
                 config,
                 parser_up))
-    except Exception as e:
-        log_fatal('Error while trying to show account information (%s)!' % str(e))
+    # except Exception as e:
+    #     log_fatal('Error while trying to show account information (%s)!' % str(e))
     finally:
         request_logout(login)
 
@@ -1130,7 +1130,6 @@ def workaround_fetch_current_wifi_configuration():
                 log_bad("Can not retrieve wifi information from wpa supplicant over DBus (%s)" % str(e))
                 return None
 
-            # FIXME: Why does wpa supplicant not send us the secrets?
             try:
                 log_verbose("retrieve secrets from NetworkManager:")
                 uuid = network_manager_get_active_connection(device_name)
@@ -1193,10 +1192,10 @@ def path_selection(path: list[str], owned_entry: bool, diskless_entry: bool, uni
     return selected_path
 
 
-def get_device_from_group(group_by_provider, server):
+def get_peer_from_group(group_by_provider, server):
     provider = server['provider']
     if len(group_by_provider[provider]) == 0:
-        log_fatal('Provider %s has no more devices!' % provider) # TODO: formulate clearer
+        log_fatal('Provider %s has no more peers!' % provider) # TODO: formulate clearer
     return group_by_provider[provider].pop()
 
 
@@ -1204,13 +1203,13 @@ def path_configure_hops(config, servers, without_multihop):
     hops = []
 
     group_by_provider = defaultdict(list)
-    for device in config['devices']:
-        provider = device['provider']
-        group_by_provider[provider].append(device)
+    for peer in config['peers']:
+        provider = peer['provider']
+        group_by_provider[provider].append(peer)
 
     if without_multihop:
         for server in servers:
-            hops.append(Hop(get_device_from_group(group_by_provider, server), server))
+            hops.append(Hop(get_peer_from_group(group_by_provider, server), server))
     else:
         idx = 0
         while idx < len(servers) - 1:
@@ -1222,14 +1221,14 @@ def path_configure_hops(config, servers, without_multihop):
             )
 
             if has_multihop_support:
-                hops.append(Multihop(get_device_from_group(group_by_provider, servers[idx]), servers[idx], servers[idx+1]))
+                hops.append(Multihop(get_peer_from_group(group_by_provider, servers[idx]), servers[idx], servers[idx+1]))
             else:
-                hops.append(Hop(get_device_from_group(group_by_provider, servers[idx]), servers[idx]))
-                hops.append(Hop(get_device_from_group(group_by_provider, servers[idx+1]), servers[idx+1]))
+                hops.append(Hop(get_peer_from_group(group_by_provider, servers[idx]), servers[idx]))
+                hops.append(Hop(get_peer_from_group(group_by_provider, servers[idx+1]), servers[idx+1]))
 
             idx += 2
         if idx < len(servers):
-            hops.append(Hop(get_device_from_group(group_by_provider, servers[idx]), servers[idx]))
+            hops.append(Hop(get_peer_from_group(group_by_provider, servers[idx]), servers[idx]))
 
     return hops
 
@@ -1323,21 +1322,21 @@ def up_command(args, is_default):
     if args.update_server_list:
         update_command(None)
 
-    if len(config['devices']) == 0:
-        log_fatal('No devices configured (use `vad init` to create a device)!')
+    if len(config['peers']) == 0:
+        log_fatal('No peers configured (use `vad init` to create a peer)!')
 
     if len(args.COUNTRY_CITY_HOSTNAME) > 10:
         log_fatal('Only 10 hops are supported, you specified %d (%s)!' % (len(args.COUNTRY_CITY_HOSTNAME), args.COUNTRY_CITY_HOSTNAME))
 
     hops = len(args.COUNTRY_CITY_HOSTNAME)
     if not args.without_multihop:
-        needed = math.ceil(hops / 2) - len(config['devices'])
+        needed = math.ceil(hops / 2) - len(config['peers'])
         if needed > 0:
-            log_fatal('You do not have enough devices to build a %d hop tunnel. With multihop you need at least %d more device(s) (use `vad init --add-device`)' % (hops, needed))
+            log_fatal('You do not have enough peers to build a %d hop tunnel. With multihop you need at least %d more peer(s) (use `vad init --add-peer`)' % (hops, needed))
     else:
-        needed = hops - len(config['devices'])
+        needed = hops - len(config['peers'])
         if needed > 0:
-            log_fatal('You do not have enough devices to build a %d hop tunnel. Without multihop you need at least %d more device(s) (use `vad init --add-device`)' % (hops, needed))
+            log_fatal('You do not have enough peers to build a %d hop tunnel. Without multihop you need at least %d more peer(s) (use `vad init --add-peer`)' % (hops, needed))
 
     if len(args.COUNTRY_CITY_HOSTNAME) == 0:
         args.COUNTRY_CITY_HOSTNAME = ['w']
@@ -1363,7 +1362,7 @@ def up_command(args, is_default):
     if hops[-1].provider() == 'mullvad':
         dns_server = get_dns_from_args(args)
     else:
-        dns_server = hops[-1].device['dns']
+        dns_server = hops[-1].peer['dns']
 
     table_hops = create_hop_table(hops, args.without_multihop, title='Hop configuration with nameserver %s' % dns_server)
 
@@ -1404,15 +1403,13 @@ def up_command(args, is_default):
         hop = hops[idx]
         namespace = namespaces[idx]
         namespace_link_to = namespaces[idx+1]
-        device = hop.device
+        peer = hop.peer
         configuration_filename = CONFIGURATION_HOP % ridx
         device_name = DEVICE_NAME_HOP % ridx
-        ipv4 = device['ipv4']
-        ipv6 = device['ipv6']
 
         write_wireguard_config(
             configuration_filename,
-            private_key=device['private_key'],
+            private_key=peer['private_key'],
             public_key=hop.pubkey(),
             address=hop.ipv6() if args.only_use_ipv6 else hop.ipv4(),
             port=hop.port()
@@ -1423,8 +1420,8 @@ def up_command(args, is_default):
             namespace_link_to,
             device_name,
             configuration_filename,
-            ipv4,
-            ipv6,
+            peer['ipv4'],
+            peer['ipv6'],
             mtu,
             False
             # args.only_use_ipv6,
@@ -1694,7 +1691,6 @@ def list_command(args):
 
 
 def service_config():
-    # SUBSYSTEM=="net", ACTION=="add", DEVPATH!="/devices/virtual/*", TAG+="systemd", ENV{SYSTEMD_WANTS}="vad.move@%E{INTERFACE}"
     udev_rule = """
     SUBSYSTEM=="net", ACTION=="add", DEVPATH!="/devices/virtual/*", RUN+="/bin/systemctl start vad.move@%E{ID_NET_NAME}"
     """
@@ -1885,18 +1881,18 @@ def rotate_command(args, up_command_defaults):
     account_number = request_account_number(args.passname, config)
     config = request_login_api(args, account_number, config)
 
-    for device in config.get('devices', []):
-        if not device['provider'] == 'mullvad':
+    for config_peer in config.get('peers', []):
+        if not config_peer['provider'] == 'mullvad':
             continue
-        private_key, peer = request_update_public_key(config, device)
-        device['private_key'] = private_key
-        device['ipv4'] = peer['ipv4_address']
-        device['ipv6'] = peer['ipv6_address']
-        device['device_id'] = peer['id']
-        device['device_name'] = peer['name']
+        private_key, peer = request_update_public_key(config, config_peer)
+        config_peer['private_key'] = private_key
+        config_peer['ipv4'] = peer['ipv4_address']
+        config_peer['ipv6'] = peer['ipv6_address']
+        config_peer['peer_id'] = peer['id']
+        config_peer['peer_name'] = peer['name']
         config_save(args.config, config)
 
-    log_success("Successfully rotated WireGuard keys of all mapped devices")
+    log_success("Successfully rotated WireGuard keys of all mapped peers")
 
     if is_active():
         up_command(Namespace(**up_command_defaults), True)
@@ -1947,9 +1943,9 @@ def check_special_country_codes_not_in_use(servers):
     countries = set([server['country_code'] for server in servers])
     for server in servers:
         if 'eu' == server['country_code']:
-            log_warn("Attention, the special country code 'eu' used by this script is in use by a server. This makes this server unselectable! (%s)", str(server))
+            log_warn("Attention, the special country code 'eu' used by this program is in use by a server. This makes this server unselectable! (%s)", str(server))
         if 'ec' == server['country_code']:
-            log_warn("Attention, the special country code 'ec' used by this script is in use by a server. This makes this server unselectable! (%s)", str(server))
+            log_warn("Attention, the special country code 'ec' used by this program is in use by a server. This makes this server unselectable! (%s)", str(server))
 
 
 def update_command(args):
@@ -2216,32 +2212,32 @@ class TestInitCommand(TestCommand):
             account_number='TEST',
         )
         out = self.capture(partial(init_command, Namespace(
-            add_device=False,
+            add_peer=False,
             save_account_number=False,
             passname='pasname'
         )))
         self.assertTrue(self.called['save_config'])
         self.assertIn('account_number', self.config)
 
-    def testAddDevice(self):
+    def testAddPeer(self):
         self.config = dict(
-            devices=[dict()]
+            peers=[dict()]
         )
         out = self.capture(partial(init_command, Namespace(
             save_account_number=False,
-            add_device=True,
+            add_peer=True,
             passname='pasname'
         )))
         self.assertIn('added', out)
-        self.assertEqual(len(self.config['devices']), 2)
+        self.assertEqual(len(self.config['peers']), 2)
 
     def testAlreadyInitialized(self):
         self.config = dict(
-            devices=[dict()]
+            peers=[dict()]
         )
         out = self.capture(partial(self.assertExit, partial(init_command, Namespace(
             save_account_number=False,
-            add_device=False,
+            add_peer=False,
             passname='pasname'
         ))))
         self.assertIn('Already', out)
@@ -2250,17 +2246,17 @@ class TestInitCommand(TestCommand):
         self.request_login_result['account']['active'] = False
         out = self.capture(partial(self.assertExit, partial(init_command, Namespace(
             save_account_number=False,
-            add_device=True,
+            add_peer=True,
             passname='pasname'
         ))))
         self.assertIn('NEVER', out)
         self.assertTrue(self.called['request_logout'])
 
-    def testNoMoreDevices(self):
+    def testNoMorePeers(self):
         self.request_login_result['account']['can_add_wg_peers'] = False
         out = self.capture(partial(self.assertExit, partial(init_command, Namespace(
             save_account_number=False,
-            add_device=True,
+            add_peer=True,
             passname='pasname'
         ))))
         self.assertIn('full', out)
@@ -2269,17 +2265,17 @@ class TestInitCommand(TestCommand):
     def test(self):
         out = self.capture(partial(init_command, Namespace(
             save_account_number=False,
-            add_device=True,
+            add_peer=True,
             passname='pasname'
         )))
-        self.assertIn('First device added', out)
+        self.assertIn('First peer added', out)
         self.assertTrue(self.called['update_command'])
         self.assertTrue(self.called['request_login'])
         self.assertTrue(self.called['request_logout'])
         self.assertTrue(self.called['request_add_key'])
         self.assertEqual(
             self.config,
-            dict(devices=[dict(
+            dict(peers=[dict(
                 private_key='PRIVATE',
                 ipv4='4',
                 ipv6='6',
@@ -2365,23 +2361,23 @@ def vad():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    init = subparsers.add_parser('init', help='Initalize Mullvad VPN. Adds devices to this computer. Without arguments, adds a new device to your account to this computer (will ask for your account number)', **subparser_args)
+    init = subparsers.add_parser('init', help='Initalize Mullvad VPN. Adds peers to this computer. Without arguments, adds a new peer to your account to this computer (will ask for your account number)', **subparser_args)
     init.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
-    init.add_argument('-a', '--add-device', action='store_true', help='Creates an additonal device for your account to built tunnels over more hops. Every new devices enables one hop. In a multihop configuration (https://mullvad.net/de/help/multihop-wireguard) every devices enables two hops. Normally 5 devices are possible per account, this allows a maximum of ten hops.')
+    init.add_argument('-a', '--add-peer', action='store_true', help='Creates an additonal peer for your account to built tunnels over more hops. Every new peers enables one hop. In a multihop configuration (https://mullvad.net/de/help/multihop-wireguard) every peers enables two hops. Normally 5 peers are possible per account, this allows a maximum of ten hops.')
     init.add_argument('-d', '--dont-save-account-number', action='store_true', help='Does not save the account number into the configuration file. Useful if you have the account number in `pass`.')
     init.set_defaults(func=init_command)
 
-    delete = subparsers.add_parser('delete', help='Delete mapped device(s) from this computer and your account.', **subparser_args)
-    delete.add_argument('--all', action='store_true', help='Delete all mapped devices.')
+    delete = subparsers.add_parser('delete', help='Delete mapped peer(s) from this computer and your account.', **subparser_args)
+    delete.add_argument('--all', action='store_true', help='Delete all mapped peers.')
     delete.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
-    delete.add_argument('INDEX', nargs='?', metavar='INDEX', choices=['0','1','2','3','4','5','6','7','8','9'], help='Delete specified mapped device from this computer and your account (find index with `vad info`). BEWARE index of other devices change after one delete.')
+    delete.add_argument('INDEX', nargs='?', metavar='INDEX', choices=['0','1','2','3','4','5','6','7','8','9'], help='Delete specified mapped peer from this computer and your account (find index with `vad info`). BEWARE index of other peers change after one delete.')
     delete.set_defaults(func=delete_command)
 
-    info = subparsers.add_parser('info', help='View account information and highlight devices added to this computer.', **subparser_args)
+    info = subparsers.add_parser('info', help='View account information and highlight peers added to this computer.', **subparser_args)
     info.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     info.add_argument('-a', '--show-account-number', action='store_true', help='Shows the account number.')
-    info.add_argument('-s', '--show-device-ids', action='store_true', help='Show device ids.')
-    info.add_argument('-6', '--show-ipv6', action='store_true', help='Show IPv6 address column of device.')
+    info.add_argument('-s', '--show-peer-ids', action='store_true', help='Show peer ids.')
+    info.add_argument('-6', '--show-ipv6', action='store_true', help='Show IPv6 address column of peer.')
     info.add_argument('-r', '--raw', action='store_true', help='Output raw account information.')
     info.set_defaults(func=info_command)
 
@@ -2395,7 +2391,7 @@ def vad():
     up.add_argument('-a', '--update-server-list', action='store_true', help='Update server list.')
     up.add_argument('-n', '--dry-run', action='store_true', help='Show only chosen hop(s) and nameserver.')
     up.add_argument('-d', '--dns', nargs=1, help='Set a blocking dns server by flags (atmpg) or with no flags use the nonblocking dns server (10.64.0.1): a = Block adverdisments, t = Block tracking, m = Block malicious sites, p = Block adult content, g = Block gampling sites.', default='')
-    up.add_argument('-w', '--without-multihop', action='store_true', help='Normally pairs of hops are taken and configured as multihop beginning from the last hop. Every hop pair requires one device, with this option every hop requires one device.')
+    up.add_argument('-w', '--without-multihop', action='store_true', help='Normally pairs of hops are taken and configured as multihop beginning from the last hop. Every hop pair requires one peer, with this option every hop requires one peer.')
     up.add_argument('-u', '--uniform-by-country', action='store_true', help='Randomly select a country and then randomly select a hop.')
     up.add_argument('-o', '--owned-entry', action='store_true', help='Use a owned server by Mullvad for your entry hop.')
     up.add_argument('-b', '--diskless-entry', action='store_true', help='Use a diskless server for your entry hop (stboot [BETA]).')
@@ -2441,11 +2437,11 @@ def vad():
     move.add_argument('INTERFACE', nargs=1, help='Interface name that will be moved.')
     move.set_defaults(func=move_command)
 
-    rotate = subparsers.add_parser('rotate', help='Rotate WireGuard keys from all mapped devices.')
+    rotate = subparsers.add_parser('rotate', help='Rotate WireGuard keys from all mapped peers.')
     rotate.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     rotate.set_defaults(func=rotate_command)
 
-    reset = subparsers.add_parser('reset', help='Tear down vpn, delete all mapped devices to this computer, remove services added through `vpn service` and remove account related information from configuration.')
+    reset = subparsers.add_parser('reset', help='Tear down vpn, delete all mapped peers to this computer, remove services added through `vpn service` and remove account related information from configuration.')
     reset.set_defaults(func=reset_command)
 
     test = subparsers.add_parser('test', help='Run unittests.')

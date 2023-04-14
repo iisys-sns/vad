@@ -120,7 +120,7 @@ $ vad
 Build a 3 hop tunnel:
 
 ```sh
-$ vad init -a       # We need one more device for the first tunnel
+$ vad init -a       # We need one more peer for the first tunnel
 $ vad up de pl se   # 3 hops: Tunnel(de) -> Multihop(pl, se)
 $ vad
 ```
@@ -137,7 +137,7 @@ Show account information:
 $ vad info
 ```
 
-Rotate WireGuard keys for all mapped devices:
+Rotate WireGuard keys for all mapped peers:
 
 ```sh
 $ vad down
@@ -147,7 +147,7 @@ $ vad info
 $ vad
 ```
 
-Rotate WireGuard keys for all mapped devices while the VPN is active:
+Rotate WireGuard keys for all mapped peers while the VPN is active:
 
 ```sh
 $ vad up         # Remembers the configuration from `vad up de pl se` and builds a 3 hop tunnel
@@ -202,7 +202,7 @@ Portforwarding and game servers (TODO Does not work at the moment but gives a pr
 ```sh
 $ vad port 8888           # Forwards a random port (e.g. 55055) from your current exit to the local port 8888.
 <exit-ip>:55055 -> 8888   # Normally you can not access this port with your exit ip address, but it will add nat rules with `iptables` so you can.
-                          # One port is allocated in your account, for your current exit device. This port 55055 will stay the same as long as it is not deleted.
+                          # One port is allocated in your account, for your current exit peer. This port 55055 will stay the same as long as it is not deleted.
 
 $ vad info
 $ vad down        # Will delete added nat rules.
@@ -218,7 +218,7 @@ $ vad list <country>      # Normally you want a game server close to the people 
 $ vad up <hostname>                   # Use the hostname.
 $ vad port <game-server-port>         # This will allocate a differnt port from your account (e.g. 60606),
 <hostname-exit-ip>:60606 -> <game-server-port>
-                                      # if you do not have ports left it will ask you which port you want to delete from your mapped devices.
+                                      # if you do not have ports left it will ask you which port you want to delete from your mapped peers.
                                       # Now you can edit the configuration and add `*_pre` and `*_post` commands so everythings starts automatically.
                                       # At least you need to add `vad port <game-server-port>` in `post_up`.
 $ vad down                            # Not running
@@ -240,9 +240,8 @@ $ # vad down
 * [ ] Currently the configuration file under `/etc/vad/config.yaml` is not only read but also written to, to store state information.
   From the persepective of the user this is unexepected behaviour and it would be better to split configuration from state.
   The state information could resiate in `/var/run/vad/state`.
-* [ ] Terminology is a bit confusing at the moment, e.g. we use "device" for linux interfaces and Mullvad devices. (Rename "devices" to "peers")
 * [ ] Add command `vad add` instead of `vad init -a`
-* [ ] Support adding external devices with `vad add`
+* [ ] Support adding external peers with `vad add`
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until it down.
 * [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
@@ -251,16 +250,16 @@ $ # vad down
 * [ ] A workaround for doubling wlan configuratoin exists now, but it needs to be revisied in the future.
   It would be better to move NetworkManager directly into the physical namespace. From testing this is possible and it sees the devices,
   but will not manage them (keyword: strictly unmanged), for whatever reason.
-* [ ] Always pick the device with the most number of ports as exit where the city code matches
-* [ ] Add `--static-exit-peer` to up command (useful if specific ports are mapped to this device)
+* [ ] Always pick the peer with the most number of ports as exit where the city code matches
+* [ ] Add `--static-exit-peer` to up command (useful if specific ports are mapped to this peer)
 * [ ] Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible).
   ```sh
   $ vad port 22      # map one port from the exit server to the local port 22
   $ vad port 22 443  # map two ports of the exit server to the local ports 22 and 443
   ```
-  If this device has no port on this exit server: ask the user which port to delete and add it to the exit.
+  If this peer has no port on this exit server: ask the user which port to delete and add it to the exit.
   If no ports are available on the account anymore, nothing we can do about it, just ask the user to delete one port on another computer.
-  It would be possible delete a port from a device not mapped to this computer, but it depends on the use case.
+  It would be possible delete a port from a peer not mapped to this computer, but it depends on the use case.
   For now we won't delete that port automatically.
   Add a `--volatile` flag to this command to automatically delete this port on down or partial down.
   Ports mapping may not survive a up/down or partial up/down, because the exit can change!
