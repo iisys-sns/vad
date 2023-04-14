@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+import errno
+import ctypes
+import ctypes.util
 import argparse
 import atexit
 import dbus
@@ -113,6 +116,40 @@ class Hop:
         return 51820
     def provider(self):
         return self.server['provider']
+
+
+class NetworkNamespace:
+    def __init__(self, namespace_name: str):
+        self.namespace_name = namespace_name
+        self.current_net_ns = None
+        self.target_net_ns = None
+
+        try:
+            self.libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
+        except OSError as e:
+            log_fatal("Failed to change netns to '%s' (%s)" % (self.namespace_name, str(e)))
+
+    def __enter__(self):
+        log_verbose("Enter network namespace %s" % self.namespace_name)
+        try:
+            self.current_net_ns = os.open('/proc/self/ns/net', os.O_RDONLY)
+            self.target_net_ns = os.open(f'/var/run/netns/{self.namespace_name}', os.O_RDONLY)
+        except OSError as e:
+            log_fatal("Failed to change netns to '%s' (%s)" % (self.namespace_name, str(e)))
+
+        result = self.libc.setns(self.target_net_ns, 0);
+        if result != 0:
+            error_messsage = os.strerror(ctypes.get_errno())
+            log_fatal("Failed to change netns to '%s' (%s)" % (self.namespace_name, error_message))
+        run_or_fail(['mount', '-t', 'sysfs', 'none', '/sys'])
+
+    def __exit__(self, *args):
+        run_or_fail(['umount', '/sys'])
+        result = self.libc.setns(self.current_net_ns, 0);
+        if result != 0:
+            error_messsage = os.strerror(ctypes.get_errno())
+            log_fatal("Failed to change netns back (%s)" % (self.namespace_name, error_message))
+        log_verbose("Leave network namespace %s" % self.namespace_name)
 
 
 def nop_colored(text, *args, **kwargs):
@@ -1445,13 +1482,14 @@ def remove_network_namespace(namespace_to_remove):
             run(['ip', 'netns', 'exec', namespace_to_remove, 'kill'] + pids)
 
     if namespace_to_remove == NAMESPACE_PHYSICAL:
-        devices = get_network_devices_from_namespace(namespace_to_remove)
-        for type, name, phy in devices:
-            run(['ip', '-n', namespace_to_remove, 'link', 'set', name, 'down'])
-            if type == DeviceType.Wifi:
-                run(['ip', 'netns', 'exec', namespace_to_remove, 'iw', 'phy', phy, 'set', 'netns', '1'])
-            elif type == DeviceType.Ethernet:
-                run(['ip', '-n', namespace_to_remove, 'link', 'set', name, 'netns', '1'])
+        with NetworkNamespace(NAMESPACE_PHYSICAL):
+            devices = get_network_devices()
+            for type, name, phy in devices:
+                run(['ip', 'link', 'set', name, 'down'])
+                if type == DeviceType.Wifi:
+                    run(['iw', 'phy', phy, 'set', 'netns', '1'])
+                elif type == DeviceType.Ethernet:
+                    run(['ip', 'link', 'set', name, 'netns', '1'])
 
     run(['ip', 'netns', 'del', namespace_to_remove])
 
@@ -1954,36 +1992,6 @@ def get_network_devices():
     return devices
 
 
-# NOTE: This is just a workaround until we find a better way.
-# FIXME: This is very ugly! [get_network_devices_in_namespace]
-def get_network_devices_from_namespace(namespace):
-    devices = []
-    process = subprocess.run(['ip', 'netns', 'exec', namespace, sys.argv[0], 'dev', '-r'], capture_output=True, check=True)
-    if process.returncode == 0:
-        output = str(process.stdout, 'utf8')
-        return yaml.load(output, yaml.UnsafeLoader)
-    else:
-        return devices
-
-
-# TODO: remove
-def dev_command(args):
-    become_root(do_lock=False)
-
-    devices = get_network_devices()
-
-    # FIXME: This is very ugly! [get_network_devices_in_namespace]
-    if args.raw:
-        yaml.dump(devices, sys.stdout)
-        return
-
-    for type, dev, phy in devices:
-        if phy:
-            print('%-10s %s (%s)' % (type.name, dev, phy))
-        else:
-            print('%-10s %s' % (type.name, dev))
-
-
 class TestDependencies(unittest.TestCase):
     def test(self):
         commands = [
@@ -2404,11 +2412,6 @@ def vad():
 
     show = subparsers.add_parser('show', aliases=['s'], help='Show vpn status information, return 0 if active otherwise 1.', **subparser_args)
     show.set_defaults(func=show_command)
-
-    # TODO: remove
-    dev = subparsers.add_parser('dev', help='List all network devices in the current namespace.')
-    dev.add_argument('-r', '--raw', action='store_true', help='Output device information as yaml.')
-    dev.set_defaults(func=dev_command)
 
     list = subparsers.add_parser('list', aliases=['l'], help='List, filter and group servers.', **subparser_args)
     list.add_argument('COUNTRY_CITY_HOSTNAME', nargs='?', help='Select server by country code (e.g. de), city code (e.g. dus) or hostname if it contains this substring (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters.')
