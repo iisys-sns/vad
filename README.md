@@ -240,6 +240,10 @@ $ # vad down
 
 * [ ] Terminology is a bit confusing at the moment, e.g. we use "device" for linux interfaces and Mullvad devices. (Rename "devices" to "peers")
 * [ ] Add command `vad add` instead of `vad init -a`
+* [ ] Support adding external devices with `vad add`
+* [ ] Rename `vad service install` to `vad install`
+* [ ] Rename `vad service remove` to `vad uninstall`
+* [ ] Remove `vad dev`. Replace with `setns()` and `mount`.
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until it down.
 * [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
@@ -247,7 +251,7 @@ $ # vad down
 * [ ] Test if dependencies are installed while launching
 * [ ] Fix double configuration due to `wpa_supplicant`
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
-* [ ] Add `--exit-device` to up command (useful if specific ports are mapped to this device)
+* [ ] Add `--static-exit-peer` to up command (useful if specific ports are mapped to this device)
 * [ ] Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible).
   ```sh
   $ vad port 22      # map one port from the exit server to the local port 22
