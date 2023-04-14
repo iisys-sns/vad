@@ -39,7 +39,7 @@ The physical devices will stay inaccessible until an `vad down`.
 1. `python-dbus`,
 1. `python-requests`,
 1. `python-termcolor`,
-1. `python-prettytable` (for info and list command),
+1. `python-prettytable` (for up, info and list command),
 1. `resolvconf`,
 1. `pass` (optionally).
 
@@ -77,13 +77,14 @@ network={
 }
 ```
 
-If you do not want do configure it manually and; have NetworkManager; currently connected to an wifi network; and; `wpa_supplicant` is used, you can execute this command:
+If you do not want do configure it manually and; have NetworkManager; currently connected to an wifi network; and; `wpa_supplicant` is used, you can execute this command.
+Be aware that this is only a workaround.
 
 ```sh
 vad up -i
 ```
 
-If you have any problems, use `vad down` it will (usually) rollback all changes from `vad up`.
+If you have any problems, use `vad down` it will rollback all changes from `vad up`.
 
 First use:
 
@@ -163,15 +164,14 @@ Move your sshd into the physical namespace on `vad up`:
 $ vad down   # `post_up`, `post_down`, `pre_up` and `pre_down` will not be called for a partial down and up
 $ # Add the following to your `/etc/mullavd/config.yaml`:
 [...]
-default:
-  post_up:
-  - mkdir -p /etc/systemd/system/sshd.service.d
-  - echo -n "[Service]\nNetworkNamespacePath=/var/run/netns/physical" > /etc/systemd/system/sshd.service.d/override.conf
-  - systemctl daemon-reload
-  - systemctl restart sshd
-  post_down:
-  - systemctl revert sshd
-  - systemctl restart sshd
+post_up:
+- mkdir -p /etc/systemd/system/sshd.service.d
+- echo -n "[Service]\nNetworkNamespacePath=/var/run/netns/physical" > /etc/systemd/system/sshd.service.d/override.conf
+- systemctl daemon-reload
+- systemctl restart sshd
+post_down:
+- systemctl revert sshd
+- systemctl restart sshd
 [...]
 $ vad up
 ```
@@ -182,11 +182,10 @@ Sometimes NetworkManager interferes with the `/etc/resolv.conf` configuration, t
 $ vad down
 $ # Add the following to your `/etc/mullavd/config.yaml`:
 [...]
-default:
-  pre_up:
-  - systemctl stop NetworkManager
-  post_down:
-  - systemctl start NetworkManager
+pre_up:
+- systemctl stop NetworkManager
+post_down:
+- systemctl start NetworkManager
 [...]
 $ vad up
 ```
