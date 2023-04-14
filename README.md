@@ -1,11 +1,10 @@
 # Vad
 
-An alternative experimental command line interface (CLI) for Mullvad that is based on network namespaces and supports up to ten hops.
+An alternative experimental command line interface (CLI) for Mullvad that is based on network namespaces, supports up to ten hops and does not need a daemon.
 It aims to be very user friendly.
 It is based on [this](https://www.wireguard.com/netns#sample-script) script.
-Even if ten hops are supported, only three may be useful in terms of performance and privacy.
-Normally, most VPN users will use only one hop.
-If you use more than one hop, you may be more easily identified by a passive external attacker watching incoming and outgoing traffic of an intermediate hop, due to traffic correlation.
+It is unclear how much privacy you can gain if use more than one hop.
+But you will, for sure, lose performance.
 
 With network namespaces all programs from users, except programs that run with root rights, are forced to use the VPN interface to connect to the Internet, without complex iptable rules.
 An so-called "kill switch" is already integrated.
@@ -162,7 +161,7 @@ Move your sshd into the physical namespace on `vad up`:
 
 ```sh
 $ vad down   # `post_up`, `post_down`, `pre_up` and `pre_down` will not be called for a partial down and up
-$ # Add the following to your `/etc/mullavd/config.yaml`:
+$ # Add the following to your `/etc/vad/config.yaml`:
 [...]
 post_up:
 - mkdir -p /etc/systemd/system/sshd.service.d
@@ -180,7 +179,7 @@ Sometimes NetworkManager interferes with the `/etc/resolv.conf` configuration, t
 
 ```sh
 $ vad down
-$ # Add the following to your `/etc/mullavd/config.yaml`:
+$ # Add the following to your `/etc/vad/config.yaml`:
 [...]
 pre_up:
 - systemctl stop NetworkManager
@@ -238,6 +237,9 @@ $ # vad down
 
 ## TODOs
 
+* [ ] Currently the configuration file under `/etc/vad/config.yaml` is not only read but also written to, to store state information.
+  From the persepective of the user this is unexepected behaviour and it would be better to split configuration from state.
+  The state information could resiate in `/var/run/vad/state`.
 * [ ] Terminology is a bit confusing at the moment, e.g. we use "device" for linux interfaces and Mullvad devices. (Rename "devices" to "peers")
 * [ ] Add command `vad add` instead of `vad init -a`
 * [ ] Support adding external devices with `vad add`
@@ -246,7 +248,9 @@ $ # vad down
 * [ ] Add some documentation comments
 * [ ] Implement a configuration class and api request class
 * [ ] Test if dependencies are installed while launching
-* [ ] Fix double configuration due to `wpa_supplicant`
+* [ ] A workaround for doubling wlan configuratoin exists now, but it needs to be revisied in the future.
+  It would be better to move NetworkManager directly into the physical namespace. From testing this is possible and it sees the devices,
+  but will not manage them (keyword: strictly unmanged), for whatever reason.
 * [ ] Always pick the device with the most number of ports as exit where the city code matches
 * [ ] Add `--static-exit-peer` to up command (useful if specific ports are mapped to this device)
 * [ ] Add commands to easily manage port forwarding (`iptables -t nat`): request and forward to local port (automatically add port to exit server if possible).
