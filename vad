@@ -856,7 +856,7 @@ def delete_command(args):
             public_key = get_public_key(peer['private_key'])
             request_revoke_key(login, public_key)
             config['peers'].remove(peer)
-            log_info("Deleted peer %s (index %d)!" % (public_key, index))
+            log_info("Deleted peer %s!" % (public_key))
         config = config_save(args.config, config)
     finally:
         request_logout(login)
