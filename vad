@@ -1582,7 +1582,6 @@ def list_command(args):
         servers=servers
     )
 
-
     if args.group_by_country:
         countries = defaultdict(int)
         for server in servers:
@@ -1619,11 +1618,19 @@ def list_command(args):
             )
             providers[key] += 1
 
-        table = PrettyTablePretty(['Count', 'Provider'])
-        table.align['Count'] = 'r'
-        table.align['Provider'] = 'l'
+        total = 0
         for (provider), count in sorted(providers.items(), key=lambda k: k[1]):
-            table.add_row([count, provider])
+            total += count
+
+        table = PrettyTablePretty(['Count', 'Percent', 'Cum. Percent', 'Provider'])
+        table.align['Count'] = 'r'
+        table.align['Percent'] = 'r'
+        table.align['Cum. Percent'] = 'r'
+        table.align['Provider'] = 'l'
+        cumsum = 0
+        for (provider), count in sorted(providers.items(), key=lambda k: k[1]):
+            cumsum += count
+            table.add_row([count, '%.1f' % (count/total*100), '%.1f' % (cumsum/total*100), provider])
         print(table)
     else:
         fields = ['Active', 'Owned', 'Diskless']
