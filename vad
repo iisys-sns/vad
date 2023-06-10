@@ -20,8 +20,11 @@ import sys
 import textwrap
 import unittest
 import yaml
+import gi
 
+gi.require_version("NM", "1.0")
 
+from gi.repository import NM
 from datetime import datetime
 from termcolor import colored
 from argparse import Namespace
@@ -1103,15 +1106,12 @@ def print_status_connected():
 
 
 def network_manager_get_active_connection(device_name):
-    process = run(
-        ["nmcli", "con", "show", "--active"],
-        failure_ok=True, print_output=False
-    )
-    output = str(process.stdout, 'utf8').strip()
-    for line in output.split('\n'):
-        ssid, uuid, net, name, _ = re.split("\s+", line)
-        if name == device_name:
-            return uuid
+    client = NM.Client.new(None)
+    for device in client.get_devices():
+        if device.get_iface() == device_name:
+            connection = device.get_active_connection()
+            if connection is not None:
+                return connection.get_uuid()
 
 
 def network_manager_set_secret(uuid, config):
