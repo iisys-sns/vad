@@ -546,9 +546,9 @@ def request_login_api(args, account_number, config):
 
 
 def request_add_key(login):
-    log_verbose('request add key...', end='')
     private_key = generate_private_key()
     public_key = get_public_key(private_key)
+    log_verbose('request add key...', end='')
     try:
         response = requests.post(
             "https://api.mullvad.net/www/wg-pubkeys/add/",
@@ -798,14 +798,14 @@ def init_command(args):
         if not account['can_add_wg_peers']:
             log_fatal('You can not add more peers to your account, your account is full!' )
 
-        private_key, peer = request_add_key(login)
+        added_private_key, added_peer = request_add_key(login)
 
         account = request_account(login)
 
         for peer in account['account']['wg_peers']:
-            if peer['key']['public'] == peer['key']['public']:
+            if peer['key']['public'] == added_peer['key']['public']:
                 config['peers'].append(dict(
-                    private_key=private_key,
+                    private_key=added_private_key,
                     ipv4=peer['ipv4_address'],
                     ipv6=peer['ipv6_address'],
                     peer_id=peer['device_id'],
@@ -1178,7 +1178,7 @@ def write_wpa_supplicant_config(wifi_config):
         key = key.strip()
         value = value.strip()
         if len(value) == 0:
-            log_debug("key has zero length!")
+            log_verbose("key has zero length!")
             continue
         config.append('    %s=%s' % (key, value))
     config.append("}")
@@ -1549,6 +1549,10 @@ def down_command(args):
 
     if (config and not args.partial):
         config_execute_commands(config, 'post_down')
+
+    log_verbose("Reset hop configuration")
+    config['hops'] = []
+    config = config_save(args.config, config)
 
     if args.partial:
         log_success("VPN is succefully down (partial)")
