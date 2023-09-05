@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import atexit
 import base64
@@ -10,6 +12,7 @@ import errno
 import fcntl
 import gi
 import glob
+import ipaddress
 import json
 import math
 import os
@@ -17,9 +20,12 @@ import random
 import re
 import requests
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import textwrap
+import threading
 import unittest
 import yaml
 
@@ -31,6 +37,7 @@ from termcolor import colored
 from argparse import Namespace
 from collections import defaultdict
 from collections import Counter
+from collections import deque
 from datetime import datetime
 from enum import Enum
 from prettytable import PrettyTable, ALL, NONE, FRAME
@@ -41,15 +48,12 @@ from requests import Response
 from contextlib import redirect_stdout
 from functools import partial
 from dataclasses import dataclass
+from typing import Tuple
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 import nacl.signing, nacl.public
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 
-
-def to_curve25519_private_key(private_key: Ed25519PrivateKey) -> X25519PrivateKey:
-    private = nacl.signing.SigningKey(seed=private_key, encoder=nacl.encoding.RawEncoder)
-    return X25519PrivateKey.from_private_bytes(private.to_curve25519_private_key()._private_key)
+from noise.connection import NoiseConnection, Keypair
 
 
 VERBOSE = False
@@ -59,9 +63,10 @@ PREFIX = '/etc'
 NAME = 'vad'
 RUN_DIR = '/var/run/vad'
 LOCK_FILE = f'{RUN_DIR}/lock'
-CONFIGURATION_HOP = f'{PREFIX}/wireguard/{NAME}%d.conf'
-DEVICE_NAME_HOP = f'{NAME}%d'
+WIREGUARD_DIR = f'{PREFIX}/wireguard'
+WIREGUARD_CONFIG = f'{WIREGUARD_DIR}/{NAME}-%s-%s.conf'
 NAMESPACE_HOP = f'{NAME}%d'
+DEVICE_NAME_HOP = f'{NAME}%d'
 DESCRIPTION = f'{PREFIX}/wireguard/{NAME}.description'
 CONFIGURATION = f'{PREFIX}/{NAME}/config.yaml'
 WPA_SUPPLICANT_CONF = f'{PREFIX}/wpa_supplicant/{NAME}.conf'
@@ -71,6 +76,17 @@ NAMESPACE_ROOT = '1'
 NAMESPACE_PHYSICAL = 'physical'
 EUROPE_UNION = ["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu", "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se"]
 EUROPE_CONTINENT = EUROPE_UNION + ["is", "no", "li", "ch", "uk", "gb", "me", "mk", "al", "rs", "tr", "ba", "xk", "am", "az", "by", " md", "ge", "ua"]
+
+
+ACTION_LISTEN = 0
+ACTION_STOP_LISTEN = 1
+ACTION_CONNECT = 2
+ACTION_TEST = 3
+
+RESPONSE_ACK = 10
+RESPONSE_NCK = 11
+RESPONSE_CLIENT_CONNECT = 12
+RESPONSE_STOP_LISTING = 13
 
 
 class PrettyTablePretty(PrettyTable):
@@ -132,6 +148,38 @@ class Hop:
         return self.server['vpn']
 
 
+@dataclass
+class OnionVpnUrl:
+    ipv4: str
+    port_ip: str
+    public_key: bytes
+
+    def to_url(self) -> str:
+        ipv4_bytes = ipaddress.IPv4Address(self.ipv4).packed
+        port_ip_bytes = struct.pack('!H', int(self.port_ip))
+        url = bytes([0, 0]) + ipv4_bytes + port_ip_bytes + self.public_key
+        return base64.b32encode(url).decode('utf8').lower() + '.onion.vpn'
+
+    def ed25519_public_key(self) -> Ed25519PublicKey:
+        return Ed25519PublicKey.from_public_bytes(self.public_key)
+
+    def __repr__(self) -> str:
+        return self.to_url()
+
+    @staticmethod
+    def from_url(url: str) -> OnionVpnUrl:
+        suffix = url[-10:]
+        assert suffix == '.onion.vpn'
+        url = url[:-10]
+        url = base64.b32decode(url.upper())
+        url = url[2:]
+        ipv4 = str(ipaddress.IPv4Address(url[0:4]))
+        port_ip = str(struct.unpack('!H', url[4:6])[0])
+        public_key = url[6:]
+        assert len(public_key) == 32
+        return OnionVpnUrl(ipv4, port_ip, public_key)
+
+
 class NetworkNamespace:
     def __init__(self, namespace_name: str):
         self.namespace_name = namespace_name
@@ -153,7 +201,7 @@ class NetworkNamespace:
 
         result = self.libc.setns(self.target_net_ns, 0);
         if result != 0:
-            error_messsage = os.strerror(ctypes.get_errno())
+            error_message = os.strerror(ctypes.get_errno())
             log_fatal("Failed to change netns to '%s' (%s)" % (self.namespace_name, error_message))
         run_or_fail(['mount', '-t', 'sysfs', 'none', '/sys'])
 
@@ -161,9 +209,258 @@ class NetworkNamespace:
         run_or_fail(['umount', '/sys'])
         result = self.libc.setns(self.current_net_ns, 0);
         if result != 0:
-            error_messsage = os.strerror(ctypes.get_errno())
+            error_message = os.strerror(ctypes.get_errno())
             log_fatal("Failed to change netns back (%s)" % (self.namespace_name, error_message))
         log_verbose("Leave network namespace %s" % self.namespace_name)
+
+
+class Abort(Exception):
+    pass
+
+
+class CommandFailed(Abort):
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+
+class UDPSocket:
+    def __init__(self, sock: socket.socket, address: Tuple[str, int]):
+        self.sock = sock
+        self.address = address
+
+    def settimeout(self, timeout):
+        self.sock.settimeout(timeout)
+
+    def send(self, data: bytes):
+        self.sock.sendto(data, self.address)
+
+    def recv(self, count: int):
+        data, address = self.sock.recvfrom(count)
+        assert self.address == address
+        return data
+
+
+class NoiseUDPSocket:
+    def __init__(self, noise: NoiseConnection, udp: UDPSocket, public_key: bytes = None):
+        self.noise = noise
+        self.udp = udp
+        self.address = udp.address
+        self.public_key = public_key
+
+    def settimeout(self, timeout):
+        self.udp.settimeout(timeout)
+
+    def send(self, data: bytes):
+        message = self.noise.encrypt(data)
+        self.udp.send(message)
+
+    def recv(self, count: int):
+        message = self.udp.recv(count)
+        data = self.noise.decrypt(message)
+        return data
+
+
+class InterceptRemoteStaticPublicKey:
+    def __init__(self, noise: NoiseConnection):
+        self.noise = noise
+        self.func = self.noise.noise_protocol.handshake_done
+        self.public_key = None
+
+    def __enter__(self):
+        def handshake_done():
+            self.public_key = self.noise.noise_protocol.handshake_state.rs.public_bytes
+            self.func()
+        self.noise.noise_protocol.handshake_done = handshake_done
+        return self
+
+    def __exit__(self, *args):
+        self.noise.noise_protocol.handshake_done = self.func
+
+
+def initiator_do_handshake(name, udp: UDPSocket, conn: NoiseConnection) -> NoiseUDPSocket:
+    print(f'{name}: Handshake')
+    conn.set_as_initiator()
+    conn.start_handshake()
+
+    with InterceptRemoteStaticPublicKey(conn) as intercept:
+        print(f'{name}: Handshake send to %s:%d' % udp.address)
+        message = conn.write_message()
+        udp.send(message)
+        print(f'{name}: Handshake receive...')
+        received = udp.recv(2048)
+        print(f'{name}: Handshake received from %s:%d' % udp.address)
+        payload = conn.read_message(received)
+        assert conn.handshake_finished
+        print(f'{name}: Handshake done')
+        return NoiseUDPSocket(conn, udp, intercept.public_key)
+
+
+def responder_do_handshake(name, udp: UDPSocket, conn: NoiseConnection) -> NoiseUDPSocket:
+    udp.settimeout(5)
+    print(f'{name}: Handshake')
+    conn.set_as_responder()
+    conn.start_handshake()
+
+    with InterceptRemoteStaticPublicKey(conn) as intercept:
+        print(f'{name}: Handshake receive from %s:%d' % udp.address)
+        data = udp.recv(2048)
+        conn.read_message(data)
+        print(f'{name}: Handshake send to %s:%d' % udp.address)
+        ciphertext = conn.write_message()
+        udp.send(ciphertext)
+        assert conn.handshake_finished
+        print(f'{name}: Handshake done')
+        return NoiseUDPSocket(conn, udp, intercept.public_key)
+
+
+class ProxyPeer:
+    def __init__(self, udp: UDPSocket):
+        self.udp = udp
+        self.public_key = None
+        self.handler = None
+
+    def handle(self):
+        self.handler()
+
+
+class Proxy:
+    def __init__(self, key: X25519PrivateKey, port: int):
+        self.key = key
+        self.port = port
+        self.peers = {}
+        self.listener = {}
+        self.listener_peers = deque([], 10000)
+
+    def start(self):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(10)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(('0.0.0.0' , self.port))
+            while True:
+                try:
+                    print('Proxy: Waiting for messages...')
+                    data, address = sock.recvfrom(0, socket.MSG_PEEK)
+                    if address not in self.peers:
+                        print('Proxy: New peer')
+                        peer = ProxyPeer(UDPSocket(sock, address))
+                        self.peers[address] = peer
+                        self.peers[address].handler = partial(self.state_handshake, peer)
+                    self.peers[address].handler()
+                except TimeoutError:
+                    continue
+        finally:
+            sock.close()
+
+    def state_handshake(self, peer: ProxyPeer):
+        noise = NoiseConnection.from_name(b'Noise_IK_25519_ChaChaPoly_BLAKE2s')
+        noise.set_keypair_from_private_bytes(Keypair.STATIC, self.key.private_bytes_raw())
+        peer.udp = responder_do_handshake('Proxy', peer.udp, noise)
+        peer.public_key = peer.udp.public_key
+        peer.handler = partial(self.state_normal, peer)
+
+    def state_normal(self, peer: ProxyPeer):
+        data = peer.udp.recv(2048)
+        assert len(data) >= 1
+
+        action = data[0]
+        key = data[1:]
+        unkown = False
+
+        print('Proxy: Received action from %s:%d:' % peer.udp.address, action, len(data))
+        if len(key) == 0:
+            if action == ACTION_TEST:
+                print('Proxy: Send reflexive address %s:%d' % peer.udp.address)
+                peer.udp.send(bytes([RESPONSE_ACK]) + ipv4_pack(*peer.udp.address))
+            elif action == ACTION_LISTEN:
+                assert peer.public_key is not None
+                if not peer.public_key in self.listener:
+                    print('Proxy: Add listener for %s:%d' % peer.udp.address, to_base64(peer.public_key))
+                    if self.listener_peers.maxlen == len(self.listener_peers):
+                        removed_peer = self.listener_peers.popleft()
+                        removed_peer.udp.send(bytes([RESPONSE_STOP_LISTING]))
+                    self.listener_peers.append(peer)
+                else:
+                    print('Proxy: Update listener for %s:%d' % peer.udp.address)
+                    old_peer_address = self.listener[peer.public_key]
+                    if old_peer_address != peer.udp.address:
+                        print('Proxy: Remove old listener')
+                        del self.peers[old_peer_address]
+                self.listener[peer.public_key] = peer.udp.address
+                peer.udp.send(bytes([RESPONSE_ACK]))
+            elif action == ACTION_STOP_LISTEN:
+                self.listener_peers.remove(peer)
+                del self.listener[peer.public_key]
+                peer.udp.send(bytes([RESPONSE_ACK]))
+            else:
+                unkown = True
+        elif len(key) == 32:
+            if action == ACTION_CONNECT:
+                print('Proxy: Connect %s:%d' % peer.udp.address, to_base64(key))
+                if key in self.listener:
+                    other_peer = self.peers[self.listener[key]]
+                    assert peer.public_key is not None
+                    other_peer.udp.send(bytes([RESPONSE_CLIENT_CONNECT]) + ipv4_pack(*peer.udp.address) + peer.public_key)
+                    peer.udp.send(bytes([RESPONSE_ACK]) + ipv4_pack(*self.listener[key]))
+                else:
+                    peer.udp.send(bytes([RESPONSE_NCK]))
+            else:
+                unkown = True
+        else:
+            unkown = True
+
+        if unkown:
+            print('Proxy: Received an unkown message that will be ignored')
+
+
+def punch_hole(name, udp: UDPSocket, number_of_messages=10, extra=True):
+    count = 0
+    failure = 0
+    udp.settimeout(1)
+    while True:
+        try:
+            print(f'{name}: Punchy punchy hole to %s:%d' % udp.address[0:2], end='')
+            udp.send(b'')
+            data = udp.recv(0)
+            if len(data) == 0:
+                print(' (success)')
+                count += 1
+                if count == number_of_messages:
+                    if extra:
+                        udp.send(b'')
+                    break
+        except TimeoutError as error:
+            failure += 1
+            if failure > 10:
+                raise error
+            continue
+
+    try:
+        while True:
+            data, address = udp.sock.recvfrom(2048, socket.MSG_PEEK)
+            if len(data) == 0:
+                udp.recv(0)
+            else:
+                break
+    except TimeoutError:
+        pass
+
+
+
+def get_socket_proxy_client(proxy_address, port=0):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(5)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('0.0.0.0', port))
+    return UDPSocket(sock, proxy_address)
+
+
+def get_socket_proxy_client6(proxy_address, port=0):
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    sock.settimeout(5)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('::', port))
+    return UDPSocket(sock, proxy_address)
 
 
 def nop_colored(text, *args, **kwargs):
@@ -223,6 +520,10 @@ def log_info(text, highlight=False, **kwargs):
     print(colored(text, 'blue', attrs=attrs), **kwargs)
 
 
+def log(text, **kwargs):
+    print(text, **kwargs)
+
+
 def log_good(text, **kwargs):
     print(colored(text, 'green'), **kwargs)
 
@@ -233,10 +534,6 @@ def log_success(text, **kwargs):
 
 def log_warn(text, **kwargs):
     print(colored(text, 'yellow'), **kwargs)
-
-
-class Abort(Exception):
-    pass
 
 
 def log_fatal(text, **kwargs):
@@ -265,7 +562,46 @@ def print_command(process, print_output=True, **kwargs):
         print('  ' + output)
 
 
-def run(args, failure_ok=False, print_output=True, **kwargs):
+def to_base64(data: bytes) -> str:
+    return base64.b64encode(data).decode('utf8')
+
+
+def from_base64(data: str) -> str:
+    return base64.b64decode(data)
+
+
+# TODO:: Hardcoded
+PROXY_ADDRESS = ('proxy', 50398)
+PROXY_KEY = X25519PrivateKey.from_private_bytes(from_base64('KEGMxadHKE4F0dtQ/SiYYL5/EnW6xlXna1dTF+pj8n4='))
+SERVICE_KEY = X25519PrivateKey.from_private_bytes(from_base64('+Gnm7XzLwm+ioOaVBca3ZS1UL2bklpaYD/688rnOV24='))
+
+
+
+def ipv4_pack(ip, port):
+    ip = ipaddress.IPv4Address(ip).packed
+    port = struct.pack('!H', port)
+    return ip + port
+
+
+def ipv4_unpack(data):
+    assert len(data) == 6
+    ip = data[0:4]
+    port = data[4:6]
+    return str(ipaddress.IPv4Address(ip)), struct.unpack('!H', port)[0]
+
+
+assert ipv4_unpack(ipv4_pack('127.0.0.1', 6666)) == ('127.0.0.1', 6666)
+
+
+def run(args, failure_ok=False, print_output=True, as_user=False, in_namespace=NAMESPACE_ROOT, **kwargs):
+    if as_user:
+        uid = os.getenv('SUDO_UID', os.geteuid())
+        gid = os.getenv('SUDO_GID', os.getegid())
+        args = ['sudo', '-E', '-u', '#%s' % uid, '-g', '#%s' % gid, "--"] + args
+
+    if in_namespace != NAMESPACE_ROOT:
+        args = ["ip", "netns", "exec", in_namespace] + args
+
     if VERBOSE:
         command = subprocess.list2cmdline(args)
         command = command.replace('\n','\\n')
@@ -282,9 +618,8 @@ def run(args, failure_ok=False, print_output=True, **kwargs):
     return process
 
 
-class CommandFailed(Abort):
-    def __init__(self, returncode):
-        self.returncode = returncode
+def run_in_namespace(namespace: str, args: list[str], **kwargs):
+    return run(args, in_namespace=namespace, **kwargs)
 
 
 def run_or_fail(args, **kwargs):
@@ -292,6 +627,10 @@ def run_or_fail(args, **kwargs):
     if process.returncode != 0:
         raise CommandFailed(process.returncode)
     return process
+
+
+def run_in_namespace_or_fail(namespace: str, args: list[str], **kwargs):
+    return run_or_fail(args, in_namespace=namespace, **kwargs)
 
 
 def device_move_to_physical(device):
@@ -313,26 +652,61 @@ def device_move_to_physical(device):
     run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "dhcpcd", "-b", dev])
 
 
-def write_wireguard_config(configuration_filename, private_key, public_key, address, port=51820):
-    log_verbose("Create wireguard config: %s" % configuration_filename)
+def wireguard_init(namespace, device_name, namespace_link_to, private_key, listen_port=51820):
+    log_verbose(f"Init wireguard device '%s' in namespace %s and move to namespace %s" % (
+        device_name,
+        namespace_link_to,
+        namespace,
+    ))
 
-    wireguard_config = f"""
-        [Interface]
-        PrivateKey = {private_key}
+    run_in_namespace_or_fail(namespace_link_to, ["ip", "link", "add", device_name, "type", "wireguard"])
+    run_in_namespace_or_fail(namespace_link_to, ["ip", "link", "set", device_name, "netns", namespace])
 
-        [Peer]
-        PublicKey = {public_key}
-        AllowedIPs = 0.0.0.0/0,::0/0
-        Endpoint = {address}:{port}
-        """
-
-    wireguard_config = wireguard_config.strip()
-    wireguard_config = '\n'.join([line.strip() for line in wireguard_config.split('\n')])
+    configuration_filename = WIREGUARD_CONFIG % (namespace, device_name)
 
     if os.path.exists(configuration_filename):
         log_fatal("Configuration %s already exists!" % configuration_filename)
+
     with open(configuration_filename, 'w') as c:
+        wireguard_config = f"""
+            [Interface]
+            PrivateKey = {private_key}
+            ListenPort = {listen_port}
+            """
+        wireguard_config = wireguard_config.strip()
+        wireguard_config = '\n'.join([line.strip() for line in wireguard_config.split('\n')])
         c.write(wireguard_config)
+
+    run_in_namespace_or_fail(namespace, ["wg", "setconf", device_name, configuration_filename])
+
+
+def wireguard_device_setup(namespace: str, device_name: str, ipv4: str, ipv6: str, mtu: int = 1420):
+    log_verbose(f"Setup wireguard device '%s' in namespace %s (ipv4=%s, ipv6=%s, mtu=%s)" % (
+        device_name,
+        namespace,
+        ipv4,
+        ipv6,
+        mtu
+    ))
+
+    if ipv4 is not None:
+        run_in_namespace_or_fail(namespace, ["ip", "addr", "add", ipv4, "dev", device_name])
+    if ipv6 is not None:
+        run_in_namespace_or_fail(namespace, ["ip", "addr", "add", ipv6, "dev", device_name])
+    run_in_namespace_or_fail(namespace, ["ip", "link", "set", device_name, "up"])
+    run_in_namespace_or_fail(namespace, ["ip", "link", "set", device_name, "mtu", str(mtu)])
+    run_in_namespace_or_fail(namespace, ["ip", "route", "add", "default", "dev", device_name])
+    run_in_namespace_or_fail(namespace, ["ip", "route", "add", "::/0", "dev", device_name])
+
+
+def wireguard_add_peer(namespace:str, device_name:str, public_key:str, endpoint:str=None, allowed_ips:str='0.0.0.0/0,::0/0', persistent_keepalive:int=0):
+    log_verbose("Add wireguard peer to %s in namespace %s" % (device_name, namespace))
+    command = ['wg', 'set', device_name, 'peer', public_key]
+    if endpoint is not None:
+        command.extend(['endpoint', endpoint])
+    command.extend(['allowed-ips', allowed_ips])
+    command.extend(['persistent-keepalive', str(persistent_keepalive)])
+    run_in_namespace_or_fail(namespace, command)
 
 
 def update_resolvconf(dns):
@@ -348,17 +722,20 @@ def update_resolvconf(dns):
     run(['resolvconf', '-u'])
 
 
+# TODO: Revist this function
 def is_active():
-    any_exists = os.path.exists(CONFIGURATION_HOP % 0) or os.path.exists(DESCRIPTION)
-    all_exists = os.path.exists(CONFIGURATION_HOP % 0) and os.path.exists(DESCRIPTION)
+    configuration_filename = WIREGUARD_CONFIG % (NAMESPACE_ROOT, DEVICE_NAME_HOP % 0)
+
+    any_exists = os.path.exists(configuration_filename) or os.path.exists(DESCRIPTION)
+    all_exists = os.path.exists(configuration_filename) and os.path.exists(DESCRIPTION)
 
     if not any_exists == all_exists:
         log_warn('Warning: If the VPN is active or inactive two things should exist or not exist:')
         log_warn('- %s (%s) and' % (DESCRIPTION, os.path.exists(DESCRIPTION)))
-        log_warn('- %s (%s)' % (CONFIGURATION_HOP % 0, os.path.exists(CONFIGURATION_HOP % 0)))
+        log_warn('- %s (%s)' % (configuration_filename, os.path.exists(configuration_filename)))
 
     return (
-        os.path.exists(CONFIGURATION_HOP % 0) or
+        os.path.exists(configuration_filename) or
         os.path.exists(DESCRIPTION)
     )
 
@@ -653,7 +1030,7 @@ def request_port_add(login, public_key, country_code, city_code):
     if response.ok:
         return response.json()
     else:
-        None
+        print(response)
 
 
 # TODO: error handling
@@ -877,14 +1254,14 @@ def delete_command(args):
     return config
 
 
-def generate_private_key():
+def generate_private_key() -> str:
     process = run(['wg', 'genkey'], failure_ok=True, print_output=False)
     key = str(process.stdout, 'utf8').strip()
     assert len(key) == 44
     return key
 
 
-def get_public_key(private_key):
+def get_public_key(private_key: str) -> str:
     process = subprocess.Popen(['wg', 'pubkey'], stdout=subprocess.PIPE, stdin=subprocess.PIPE)
     process.stdin.write(bytes('%s\n' % private_key, 'utf8'))
     process.stdin.close()
@@ -1060,7 +1437,7 @@ def get_dns_from_args(args):
         return get_dns_server_from_flags(args.dns[0])
 
 
-def create_network_namespace(namespace_new):
+def create_network_namespace(namespace_new: str):
     log_verbose(f"Create namespace %s" % namespace_new)
     run_or_fail(["ip", "netns", "add", namespace_new])
     run_or_fail(["ip", "-n", namespace_new, "link", "set", "lo", "up"])
@@ -1068,38 +1445,7 @@ def create_network_namespace(namespace_new):
     run_or_fail(["ip", "netns", "exec", namespace_new, "sysctl", 'net.ipv4.ping_group_range=0 2147483647'])
 
 
-def setup_wireguard_device(namespace, namespace_link_to, device_name, config_filename, ipv4, ipv6, mtu, only_use_ipv6):
-    namespace_link_to_text = namespace_link_to
-    if namespace_link_to == NAMESPACE_ROOT:
-        namespace_link_to_text = 'root'
-    log_verbose(f"Setup wireguard device in namespace %s and move to namespace %s (device=%s, ipv4=%s, ipv6=%s, mtu=%s)" % (
-        namespace,
-        namespace_link_to,
-        device_name,
-        ipv4,
-        ipv6,
-        mtu
-    ))
-
-    run_or_fail(["ip", "-n", namespace, "link", "add", device_name, "type", "wireguard"])
-    run_or_fail(["ip", "-n", namespace, "link", "set", device_name, "netns", namespace_link_to])
-
-    execute_namespace = []
-    if namespace_link_to != NAMESPACE_ROOT:
-        execute_namespace = ["ip", "netns", "exec", namespace_link_to]
-
-    run_or_fail(execute_namespace + ["wg", "setconf", device_name, config_filename])
-    if not only_use_ipv6:
-        run_or_fail(execute_namespace + ["ip", "addr", "add", ipv4, "dev", device_name])
-    if ipv6 is not None:
-        run_or_fail(execute_namespace + ["ip", "addr", "add", ipv6, "dev", device_name])
-    run_or_fail(execute_namespace + ["ip", "link", "set", device_name, "up"])
-    run_or_fail(execute_namespace + ["ip", "link", "set", device_name, "mtu", str(mtu)])
-    run_or_fail(execute_namespace + ["ip", "route", "add", "default", "dev", device_name])
-
-
 def print_status_connected():
-    # https://am.i.mullvad.net/json
     try:
         response = requests.get("https://am.i.mullvad.net/connected")
         if 'You are not' in response.text:
@@ -1421,31 +1767,30 @@ def up_command(args, is_default):
         ridx = len(hops) - idx - 1
 
         hop = hops[idx]
-        namespace = namespaces[idx]
-        namespace_link_to = namespaces[idx+1]
-        peer = hop.peer
-        configuration_filename = CONFIGURATION_HOP % ridx
+        namespace = namespaces[idx+1]
+        namespace_link_to = namespaces[idx]
         device_name = DEVICE_NAME_HOP % ridx
 
-        write_wireguard_config(
-            configuration_filename,
-            private_key=peer['private_key'],
-            public_key=hop.pubkey(),
-            address=hop.ipv6() if args.only_use_ipv6 else hop.ipv4(),
-            port=hop.port()
+        wireguard_init(
+            namespace,
+            device_name,
+            namespace_link_to,
+            hop.peer['private_key']
         )
 
-        setup_wireguard_device(
+        wireguard_device_setup(
             namespace,
-            namespace_link_to,
             device_name,
-            configuration_filename,
-            peer['ipv4'],
-            peer['ipv6'],
-            mtu,
-            False
-            # args.only_use_ipv6,
-            # TODO: Why does IPv6 only not work?
+            ipv4=None if args.only_use_ipv6 else hop.peer['ipv4'],
+            ipv6=hop.peer['ipv6'],
+            mtu=mtu
+        )
+
+        wireguard_add_peer(
+            namespace,
+            device_name,
+            public_key=hop.pubkey(),
+            endpoint=f'{hop.ipv6()}:{hop.port()}' if args.only_use_ipv6 else f'{hop.ipv4()}:{hop.port()}'
         )
 
         mtu -= 80
@@ -1478,37 +1823,37 @@ def network_namespace_exists(namespace):
     return os.path.exists('/var/run/netns/%s' % namespace)
 
 
-def remove_linked_device(namespace_to_remove, namespace_linked_to, device_name):
-    log_verbose("Delete device %s from linked network namespace %s (birth place: %s)" % (device_name, namespace_linked_to, namespace_to_remove))
+def remove_device(namespace, device_name):
+    log_verbose("Delete device %s from network namespace %s" % (device_name, namespace))
 
-    if namespace_linked_to == NAMESPACE_ROOT:
+    if namespace == NAMESPACE_ROOT:
         run(['resolvconf', '-d', '%s.vad' % device_name])
         run(['ip', 'link', 'del', device_name])
     else:
-        run(['ip', '-n', namespace_linked_to, 'link', 'del', device_name])
+        run(['ip', '-n', namespace, 'link', 'del', device_name])
 
 
-def remove_network_namespace(namespace_to_remove):
-    log_verbose("Remove network namespace %s" % (namespace_to_remove))
-    process = run(['ip', 'netns', 'pids', namespace_to_remove], failure_ok=True)
+def remove_network_namespace(namespace):
+    log_verbose("Remove network namespace %s" % namespace)
+    process = run(['ip', 'netns', 'pids', namespace], failure_ok=True)
     if process.returncode == 0:
         pids = str(process.stdout, 'utf8')
         pids = pids.split('\n')
         pids = pids[:-1]
         if pids:
-            run(['ip', 'netns', 'exec', namespace_to_remove, 'kill'] + pids)
+            run(['ip', 'netns', 'exec', namespace, 'kill'] + pids)
 
-    if namespace_to_remove == NAMESPACE_PHYSICAL:
+    if namespace == NAMESPACE_PHYSICAL:
         with NetworkNamespace(NAMESPACE_PHYSICAL):
             devices = get_network_devices()
             for type, name, phy in devices:
                 run(['ip', 'link', 'set', name, 'down'])
                 if type == DeviceType.Wifi:
-                    run(['iw', 'phy', phy, 'set', 'netns', '1'])
+                    run(['iw', 'phy', phy, 'set', 'netns', NAMESPACE_ROOT])
                 elif type == DeviceType.Ethernet:
-                    run(['ip', 'link', 'set', name, 'netns', '1'])
+                    run(['ip', 'link', 'set', name, 'netns', NAMESPACE_ROOT])
 
-    run(['ip', 'netns', 'del', namespace_to_remove])
+    run(['ip', 'netns', 'del', namespace])
 
 
 def remove_file_if_exists(filename):
@@ -1520,7 +1865,8 @@ def remove_file_if_exists(filename):
 def down_command(args):
     become_root()
 
-    run(['systemctl', 'mask', 'vad.move@.service'])
+    if not args.partial:
+        run(['systemctl', 'mask', 'vad.move@.service'])
 
     config = config_load(args.config)
 
@@ -1528,11 +1874,11 @@ def down_command(args):
         config_execute_commands(config, 'pre_down')
 
     remove_file_if_exists(DESCRIPTION)
-    remove_file_if_exists(CONFIGURATION_HOP % 0)
+    remove_file_if_exists(WIREGUARD_CONFIG % (NAMESPACE_ROOT, DEVICE_NAME_HOP % 0))
 
     namespaces = [NAMESPACE_ROOT]
     for idx in range(1, 10):
-        remove_file_if_exists(CONFIGURATION_HOP % idx)
+        remove_file_if_exists(WIREGUARD_CONFIG % (NAMESPACE_HOP % idx, DEVICE_NAME_HOP % idx))
         if network_namespace_exists(NAMESPACE_HOP % idx):
             namespaces.append(NAMESPACE_HOP % idx)
     namespaces.append(NAMESPACE_PHYSICAL)
@@ -1540,22 +1886,17 @@ def down_command(args):
     for idx in reversed(range(len(namespaces))):
         namespace = namespaces[idx]
         if network_namespace_exists(namespace):
-            interface_name = namespaces[idx-1]
+            device_name = namespaces[idx-1]
+            if device_name == NAMESPACE_ROOT:
+                device_name = 'vad0'
 
-            if interface_name == NAMESPACE_ROOT:
-                interface_name = 'vad0'
-
-            remove_linked_device(
-                namespace_to_remove=namespaces[idx],
-                namespace_linked_to=namespaces[idx-1],
-                device_name=interface_name,
-            )
+            remove_device(namespaces[idx-1], device_name)
 
             if args.partial and namespaces[idx] == NAMESPACE_PHYSICAL:
                 continue
 
             remove_network_namespace(
-                namespace_to_remove=namespaces[idx]
+                namespace=namespaces[idx]
             )
 
     if (config and not args.partial):
@@ -1575,7 +1916,7 @@ def down_command(args):
 
 
 def exec_command(args):
-    become_root()
+    become_root(do_lock=False)
 
     uid = os.getenv('SUDO_UID', os.geteuid())
     gid = os.getenv('SUDO_GID', os.getegid())
@@ -1827,6 +2168,268 @@ def service_config():
     )
 
 
+def generate_ipv6_private_address() -> ipaddress.IPv6Interface:
+    private = ipaddress.IPv6Network('fc00::/7')
+    return ipaddress.IPv6Interface(
+        random.randint(
+            int(private.network_address) + 2,
+            int(private.broadcast_address) + 1
+        )
+    )
+
+
+def get_rp_address(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, port_rp: int):
+    udp_rp = get_socket_proxy_client(proxy_address, port_rp)
+
+    conn = NoiseConnection.from_name(b'Noise_IK_25519_ChaChaPoly_BLAKE2s')
+    conn.set_keypair_from_private_bytes(Keypair.STATIC, key.private_bytes_raw())
+    conn.set_keypair_from_public_bytes(Keypair.REMOTE_STATIC, proxy_public_key.public_bytes_raw())
+    noise = initiator_do_handshake('Service', udp_rp, conn)
+
+    noise.send(bytes([ACTION_TEST]))
+    data = noise.recv(2048)
+    rp_address = data[1:]
+    print('Service: Reflexive address for RP: %s:%d' % ipv4_unpack(rp_address))
+
+    return ipv4_unpack(rp_address)
+
+
+# TODO: Implement keepalive for services
+# TODO: Better error handling
+# TODO: Rate limiting (DoS)
+# TODO: Only supportes one client
+# NOTE: Assumption: Every unique (protcol, private address, port) combination is mapped to the same public combination
+def introduction_point_service(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, our_rp_address: Tuple[str, int], port_service: int) -> Tuple[str, bytes]:
+    udp = get_socket_proxy_client(proxy_address)
+
+    conn = NoiseConnection.from_name(b'Noise_IK_25519_ChaChaPoly_BLAKE2s')
+    conn.set_keypair_from_private_bytes(Keypair.STATIC, key.private_bytes_raw())
+    conn.set_keypair_from_public_bytes(Keypair.REMOTE_STATIC, proxy_public_key.public_bytes_raw())
+    noise = initiator_do_handshake('Service', udp, conn)
+
+    noise.send(bytes([ACTION_TEST]))
+    data = noise.recv(2048)
+    print('Service: Reflexive address for IP: %s:%d' % ipv4_unpack(data[1:]))
+
+    print('Service: Request listing')
+    noise.send(bytes([ACTION_LISTEN]))
+    data = noise.recv(2048)
+    assert len(data) == 1
+
+    print('Service: Listening', to_base64(key.public_key().public_bytes_raw()))
+    noise.settimeout(None)
+    data = noise.recv(2048)
+    assert len(data) == (1 + 6 + 32)
+
+    print('Service: Got public key for peer')
+    peer_public_key = data[7:]
+    peer_public_key = X25519PublicKey.from_public_bytes(peer_public_key)
+    peer = ipv4_unpack(data[1:7])
+    peer_udp = UDPSocket(udp.sock, peer)
+    punch_hole('Service', peer_udp, extra=True)
+
+    conn = NoiseConnection.from_name(b'Noise_KK_25519_ChaChaPoly_BLAKE2s')
+    conn.set_keypair_from_private_bytes(Keypair.STATIC, key.private_bytes_raw())
+    conn.set_keypair_from_public_bytes(Keypair.REMOTE_STATIC, peer_public_key.public_bytes_raw())
+    noise = responder_do_handshake('Service', peer_udp, conn)
+
+    ipv6 = generate_ipv6_private_address()
+    print(f'Service: Allocate address for client: {ipv6}')
+    noise.send(ipv4_pack(*our_rp_address))
+    data = noise.recv(2048)
+    assert len(data) == 6
+    their_rp_address = data
+
+    noise.send(ipv6.packed + struct.pack('!H', int(port_service)))
+    noise.recv(2048)
+    return ipv6.ip, peer_public_key, ipv4_unpack(their_rp_address)
+
+
+# TODO: DoS is possible (Exhaust resources with added wireguard peers)
+# TODO: -> Introduce `max_connections` and `max_connections_per_second`
+# TODO: -> Automatically remove wireguard peers
+# NOTE: WIP: This function just demonstrates how it could work, but it is far from production ready!
+def introduction_point(stop: threading.Event, service_key: X25519PrivateKey, namespace: str, device_name: str, our_rp_address, port_service: int):
+    while not stop.is_set():
+        ipv6, peer_public_key, their_rp_address = introduction_point_service(service_key, PROXY_ADDRESS, PROXY_KEY.public_key(), our_rp_address, port_service)
+        rp_ipv4, rp_port = their_rp_address
+        wireguard_add_peer(namespace, device_name, to_base64(peer_public_key.public_bytes_raw()), endpoint=f'{rp_ipv4}:{rp_port}', allowed_ips=f'{ipv6}', persistent_keepalive=25)
+        with NetworkNamespace('service'):
+            run(['ping', '-c', '5', '-6', str(ipv6)])
+
+
+
+def get_my_public_ip():
+    try:
+        response = requests.get('https://ipv4.am.i.mullvad.net/json')
+        return response.json()['ip']
+    except Exception as e:
+        log_fatal("Error while getting public ip (%s)!" % (str(e)))
+
+
+def copy_to_clipboard(message: str):
+    from tkinter import Tk
+    r = Tk()
+    r.withdraw()
+    r.clipboard_clear()
+    r.clipboard_append(message)
+    r.update()
+
+
+def proxy_command(args):
+    Proxy(PROXY_KEY, args.port).start()
+
+
+def start_command(args, up_command_defaults):
+    become_root()
+
+    if not is_active():
+        up_command(Namespace(**up_command_defaults), True)
+
+    config = config_load(args.config)
+    if 'hops' in config and isinstance(config['hops'], list):
+        num_hops = len(config['hops'])
+    log_info('Current number of hops: %d' % num_hops)
+
+    ipv4 = get_my_public_ip()
+
+    introduction_point_thread = None
+    stop_event = None
+    service_process = None
+
+    def start():
+        nonlocal introduction_point_thread
+        nonlocal stop_event
+        nonlocal service_process
+
+        stop_event = threading.Event()
+
+        local_rp_port = random.randint(40000, 2**16)
+        rp_address = get_rp_address(SERVICE_KEY, PROXY_ADDRESS, PROXY_KEY.public_key(), local_rp_port)
+        rp_ip, rp_port = rp_address
+
+        introduction_point_thread = threading.Thread(target=introduction_point, args=(stop_event, SERVICE_KEY, 'service', 'service0', rp_address, '8000'))
+
+        url = OnionVpnUrl(*PROXY_ADDRESS, PROXY_KEY.public_key().public_bytes_raw())
+        copy_to_clipboard('vad -v connect ' + str(url))
+        log_info('Share this URL with a client: ' + str(url) + " (It does not work with a regular web browser)")
+
+        create_network_namespace('service')
+        wireguard_init('service', 'service0', NAMESPACE_ROOT, to_base64(SERVICE_KEY.private_bytes_raw()), local_rp_port)
+        wireguard_device_setup('service', 'service0', 'fc00::1', None, 1420 - (num_hops*80))
+
+        log_info('Start introduction point')
+        introduction_point_thread.start()
+        service_process = subprocess.Popen(['ip', 'netns', 'exec', 'service'] + args.CMD)
+
+    def cleanup():
+        if stop_event is not None:
+            stop_event.set()
+        if introduction_point_thread is not None and introduction_point_thread.is_alive():
+            introduction_point_thread.join()
+        if service_process is not None:
+            service_process.terminate()
+            service_process.wait()
+        remove_file_if_exists(WIREGUARD_CONFIG % ('service', 'service0'))
+        remove_device('service', 'service0')
+        remove_network_namespace('service')
+
+    try:
+        start()
+        input()
+    finally:
+        cleanup()
+
+def introduction_point_connect(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, service_public_key: X25519PublicKey, our_rp_address):
+    udp = get_socket_proxy_client(proxy_address)
+
+    conn = NoiseConnection.from_name(b'Noise_IK_25519_ChaChaPoly_BLAKE2s')
+    conn.set_keypair_from_private_bytes(Keypair.STATIC, key.private_bytes_raw())
+    conn.set_keypair_from_public_bytes(Keypair.REMOTE_STATIC, proxy_public_key.public_bytes_raw())
+    noise = initiator_do_handshake('Client', udp, conn)
+
+    noise.send(bytes([ACTION_TEST]))
+    data = noise.recv(2048)
+    print('Client: Reflexive address:', ipv4_unpack(data[1:]))
+
+    noise.send(bytes([ACTION_CONNECT]) + service_public_key.public_bytes_raw())
+    data = noise.recv(2048)
+    assert len(data) >= 1
+    action = data[0]
+    if len(data) == 1 and action == RESPONSE_NCK:
+        print('Client: No listener for key')
+        return
+    elif len(data) == 7 and action == RESPONSE_ACK:
+        print('Client: Found listener')
+        peer = ipv4_unpack(data[1:])
+        peer_udp = UDPSocket(udp.sock, peer)
+        punch_hole('Client', peer_udp)
+        # peer_udp.recv(0)
+
+        conn = NoiseConnection.from_name(b'Noise_KK_25519_ChaChaPoly_BLAKE2s')
+        conn.set_keypair_from_private_bytes(Keypair.STATIC, key.private_bytes_raw())
+        conn.set_keypair_from_public_bytes(Keypair.REMOTE_STATIC, service_public_key.public_bytes_raw())
+        noise = initiator_do_handshake('Client', peer_udp, conn)
+
+        data = noise.recv(2048)
+        assert len(data) == 6
+        their_rp_address = ipv4_unpack(data)
+
+        noise.send(ipv4_pack(*our_rp_address))
+
+        data = noise.recv(2048)
+        assert len(data) == 18
+        ipv6 = ipaddress.IPv6Address(data[0:16])
+        service_port = struct.unpack('!H', data[16:18])[0]
+        print(f'Client: Got {ipv6}:{service_port}')
+        noise.send(bytes([RESPONSE_ACK]))
+        return str(ipv6), service_port, their_rp_address
+
+
+def connect_command(args):
+    become_root(do_lock=False)
+
+    # TODO:
+    # if no is_active():
+    #   up_command(Namespace(**up_command_defaults), True)
+
+    config = config_load(args.config)
+    if 'hops' in config and isinstance(config['hops'], list):
+        num_hops = len(config['hops'])
+    log_info('Current nubmer of hops: %d' % num_hops)
+
+    url = OnionVpnUrl.from_url(args.URL[0])
+
+    log_info('Service Information:', highlight=True)
+    log('- ip address: ' + url.ipv4)
+    log('- introduction point port: ' + url.port_ip)
+    log('- service sign public key: ' + to_base64(url.public_key))
+
+    # TODO: hardcoded
+    client_key = X25519PrivateKey.from_private_bytes(from_base64('0Bz3Vpa47HCoNYrWmtZDfDFi4mEuXmgPC6Nk8mA8aU8='))
+
+    local_rp_port = random.randint(40000, 2**16)
+    our_rp_address = get_rp_address(client_key, PROXY_ADDRESS, PROXY_KEY.public_key(), local_rp_port)
+
+    log_info('IP: Connecting to introduction point', highlight=True)
+    our_ipv6, service_port, their_rp_address = introduction_point_connect(client_key, (url.ipv4, int(url.port_ip)), X25519PublicKey.from_public_bytes(url.public_key), SERVICE_KEY.public_key(), our_rp_address)
+    rp_ipv4, rp_port = their_rp_address
+    log('IP: Got our ip address from the service: ' + our_ipv6)
+
+    try:
+        create_network_namespace('client')
+        wireguard_init('client', 'client0', NAMESPACE_ROOT, to_base64(client_key.private_bytes_raw()), local_rp_port)
+        wireguard_device_setup('client', 'client0', our_ipv6, None, 1420 - (num_hops*80))
+        wireguard_add_peer('client', 'client0', to_base64(SERVICE_KEY.public_key().public_bytes_raw()), endpoint=f'{rp_ipv4}:{rp_port}', allowed_ips='fc00::1/128', persistent_keepalive=25)
+        with NetworkNamespace('client'):
+            run(['ping', '-c', '5', '-6', 'fc00::1'])
+        run_in_namespace_or_fail('client', ['chromium', f'http://[fc00::1]:{service_port}'], as_user=True)
+    finally:
+        remove_file_if_exists(WIREGUARD_CONFIG % ('client', 'client0'))
+        remove_device('client', 'client0')
+        remove_network_namespace('client')
+
+
 def install_command(args):
     become_root()
 
@@ -1898,9 +2501,9 @@ def uninstall_command(args):
     run_or_fail(['udevadm', 'control', '--reload'])
 
 
-def get_server_by_public_key(servers, public_key):
+def get_server_by_public_key(servers: list, public_key: str):
     for server in servers:
-        if server['pubkey'] == public_key:
+        if 'pubkey' in server and server['pubkey'] == public_key:
             return server
     return None
 
@@ -1953,6 +2556,7 @@ def user_add_new_port(login, all_ports, peer_ports, peer_public_key, server, cit
     log_info("Add a new port...")
     try:
         port = request_port_add(login, peer_public_key, server['country_code'], server['city_code'])
+        log_verbose("Port: " + str(port))
         port_idx = len(peer_ports)
         all_ports.append(port)
         peer_ports.append(port)
@@ -2480,21 +3084,29 @@ class TestInitCommand(TestCommand):
         )
 
 
-class TestEd25519ToCurve25519Wireguard(unittest.TestCase):
-    def testEqual(self):
-        sign_private_key: Ed25519PrivateKey = Ed25519PrivateKey.generate()
-        sign_public_key: Ed25519PublicKey = sign_private_key.public_key()
+class TestOnionVpnUrl(unittest.TestCase):
+    def test(self):
+        url = OnionVpnUrl('123.45.6.78', '6666', bytes([1]*32))
+        url_ = OnionVpnUrl.from_url(str(url))
 
-        private_key = to_curve25519_private_key(sign_private_key.private_bytes_raw())
-        public_key: X25519PublicKey = private_key.public_key()
+        self.assertEqual(url.ipv4, '123.45.6.78')
+        self.assertEqual(url.port_ip, '6666')
+        self.assertEqual(url.public_key, bytes([1]*32))
 
-        private_key_base64 = base64.b64encode(private_key.private_bytes_raw())
-        public_key_base64 = get_public_key(private_key_base64.decode('utf8'))
+        self.assertIsInstance(url.ipv4, str)
+        self.assertIsInstance(url_.ipv4, str)
+        self.assertIsInstance(url.port_ip, str)
+        self.assertIsInstance(url_.port_ip, str)
+        self.assertIsInstance(url.public_key, bytes)
+        self.assertIsInstance(url_.public_key, bytes)
 
-        self.assertEqual(
-            base64.b64encode(public_key.public_bytes_raw()).decode('utf8'),
-            public_key_base64
-        )
+        self.assertEqual(url.ipv4, url_.ipv4)
+        self.assertEqual(url.port_ip, url_.port_ip)
+        self.assertEqual(url.public_key, url_.public_key)
+        self.assertEqual(len(url.public_key), 32)
+        self.assertEqual(len(url_.public_key), 32)
+
+        self.assertEqual(str(url), 'aaahwligjynauaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaib.onion.vpn')
 
 
 def test_build_image(base_image, build, Dockerfile):
@@ -2641,6 +3253,18 @@ def vad():
     list.add_argument('-b', '--diskless', action='store_true', help='Filter by diskless boot servers.', default=None)
     list.set_defaults(func=list_command)
 
+    proxy = subparsers.add_parser('proxy', help='Start a proxy that will help an onion vpn service to connect to a client')
+    proxy.set_defaults(func=proxy_command)
+    proxy.add_argument('--port', nargs=1, default=6666, help=f'Port where the proxy should listen on')
+
+    start = subparsers.add_parser('start', help='Start an onion vpn service in its own network namespace')
+    start.set_defaults(func=start_command)
+    start.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to start the service in the service namespace with or without arguments.')
+
+    connect = subparsers.add_parser('connect', help='Connect to an onion vpn service')
+    connect.set_defaults(func=connect_command)
+    connect.add_argument('URL', nargs=1, help=f'URL')
+
     install = subparsers.add_parser('install', aliases=['in'], help='Installs a service which automatically starts the VPN on system startup and tears it down on system shutdown. A udev rule move new network devices into physical namespace and automatically creates it if it does not exists. A timer will rotate WireGuard keys every 4 days (same as the Mullvad app).')
     install.set_defaults(func=install_command)
 
@@ -2689,7 +3313,7 @@ def vad():
             args.func(args, up)
         elif args.func == up_command:
             args.func(args, is_default=is_default_arguments(parser, up, args))
-        elif args.func == rotate_command:
+        elif args.func in [rotate_command, start_command]:
             args.func(args, get_default_arguments(parser, up))
         else:
             args.func(args)
