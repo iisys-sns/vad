@@ -413,7 +413,7 @@ class Proxy:
             print('Proxy: Received an unkown message that will be ignored')
 
 
-def punch_hole(name, udp: UDPSocket, number_of_messages=10, extra=True):
+def punch_hole(name, udp: UDPSocket, number_of_messages=10):
     count = 0
     failure = 0
     udp.settimeout(1)
@@ -426,8 +426,6 @@ def punch_hole(name, udp: UDPSocket, number_of_messages=10, extra=True):
                 print(' (success)')
                 count += 1
                 if count == number_of_messages:
-                    if extra:
-                        udp.send(b'')
                     break
         except TimeoutError as error:
             failure += 1
@@ -444,7 +442,6 @@ def punch_hole(name, udp: UDPSocket, number_of_messages=10, extra=True):
                 break
     except TimeoutError:
         pass
-
 
 
 def get_socket_proxy_client(proxy_address, port=0):
@@ -1011,41 +1008,6 @@ def request_revoke_key(login, public_key):
     except Exception as e:
         log_fatal("Error while sending request to revoke public key (%s)!" % (str(e)))
     log_verbose('%s' % response.status_code)
-    return response.ok
-
-
-# TODO: error handling
-def request_port_add(login, public_key, country_code, city_code):
-    response = requests.post(
-        "https://api.mullvad.net/www/ports/add/",
-        headers=dict(
-            Authorization='Token %s' % login['auth_token']
-        ),
-        json=dict(
-            city_code='%s-%s' % (country_code, city_code),
-            pubkey=public_key
-        )
-    )
-
-    if response.ok:
-        return response.json()
-    else:
-        print(response)
-
-
-# TODO: error handling
-def request_port_remove(login, port):
-    response = requests.post(
-        "https://api.mullvad.net/www/ports/remove/",
-        headers=dict(
-            Authorization='Token %s' % login['auth_token']
-        ),
-        json=dict(
-            city_code=port['city_code'],
-            port=port['port'],
-        )
-    )
-
     return response.ok
 
 
@@ -2552,117 +2514,6 @@ def menu_select_one(selection, default):
     return selection[idx][0]
 
 
-def user_add_new_port(login, all_ports, peer_ports, peer_public_key, server, city_code):
-    log_info("Add a new port...")
-    try:
-        port = request_port_add(login, peer_public_key, server['country_code'], server['city_code'])
-        log_verbose("Port: " + str(port))
-        port_idx = len(peer_ports)
-        all_ports.append(port)
-        peer_ports.append(port)
-        return port_idx
-    except Exception as e:
-        log_fatal("Failed to add a new port! (%s)", str(e))
-
-
-def user_request_add_port(login, all_ports, peer_ports, peer_public_key, server, city_code):
-    if len(login['account']['ports']) < login['account']['max_ports']:
-        log_info("Non of the available ports for the last peer (%s) do match the city code '%s' of the last server:" % (peer_public_key, city_code))
-
-        for port in peer_ports:
-            print("- %s-%d" % (port['city_code'], port['port'] ))
-
-        return user_add_new_port(login, all_ports, peer_ports, peer_public_key, server, city_code)
-    else:
-        log_info('Choose one port to delete:')
-        print()
-        selection = []
-        for port in all_ports:
-            selection.append((port, "%s-%d" % (port['city_code'], port['port'] )))
-        selection.append((None, "(No action)"))
-        port = menu_select_one(selection, default=len(selection)-1)
-
-        if port is None:
-            return None
-
-        try:
-            request_port_remove(login, port)
-        except Exception as e:
-            log_fatal("Failed to remove port! (%s)", str(e))
-
-        return user_add_new_port(login, all_ports, peer_ports, peer_public_key, server, city_code)
-
-
-def port_command(args):
-    become_root()
-    config = config_load(args.config)
-
-    servers = load_servers()
-    servers = filter_servers(servers=servers)
-    account_number = user_request_account_number(args.passname, config)
-    login = request_login(account_number)
-
-    try:
-        if not 'hops' in config or not isinstance(config['hops'], list) or len(config['hops']) == 0:
-            log_fatal('There is no saved hop configuration in your state file (This should not happen)! Execute `vad up -u` and try again.')
-
-        last_hop = config['hops'][-1]
-        server = get_server_by_public_key(servers, last_hop['server_public_key'])
-        if servers is None:
-            log_fatal('Could not find the last server in the path (%s)! Execute `vad up -u` and try again.' % last_hop['server_public_key'])
-
-        peer_public_key = last_hop['peer_public_key']
-        peer = get_peer_by_public_key(config['peers'], peer_public_key)
-
-        all_ports = login['account']['city_ports']
-        peer_ports = get_ports_by_peer_public_key(all_ports, peer_public_key)
-
-        city_code = '%s-%s' % (server['country_code'], server['city_code'])
-
-        public_ip = server['ipv4_addr_in']
-        try:
-            response = requests.get("https://am.i.mullvad.net/json")
-            json = response.json()
-            public_ip = json['ip']
-            public_hostname = json['mullvad_exit_ip_hostname']
-        except Exception as e:
-            log_warn("Could not find our public ip address. We will use the ip address of the last server instead, which may be wrong! (%s)" % str(e))
-
-        try:
-            revert_commands = []
-            for local_port in args.LOCAL_PORT:
-                port_idx = None
-                for idx, port in enumerate(peer_ports):
-                    if port['city_code'] == city_code:
-                        port_idx = idx
-                        break
-
-                if port_idx is None:
-                    port_idx = user_request_add_port(login, all_ports, peer_ports, peer_public_key, server, city_code)
-
-                assert(port_idx is not None)
-
-                port = peer_ports.pop(port_idx)
-                all_ports.remove(port)
-                # TODO: support ipv6
-                ipv4, _ = peer['ipv4'].split('/')
-                run_or_fail(["iptables", "-I", "INPUT", "-p", "tcp", "--dport", str(port['port']), "-j", "ACCEPT"])
-                revert_commands.append(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port['port']), "-j", "ACCEPT"])
-                run_or_fail(["iptables", "-I", "INPUT", "-p", "tcp", "--dport", local_port, "-j", "ACCEPT"])
-                revert_commands.append(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", local_port, "-j", "ACCEPT"])
-                run_or_fail(["iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", str(port['port']), "-j", "DNAT", "--to-destination", "%s:%s" % (ipv4, local_port)])
-                revert_commands.append(["iptables", "-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", str(port['port']), "-j", "DNAT", "--to-destination", "%s:%s" % (ipv4, local_port)])
-                run_or_fail(["iptables", "-t", "nat", "-A", "OUTPUT", "-d", public_ip, "-p", "tcp", "-m", "tcp", "--dport", str(port['port']), "-j", "DNAT", "--to-destination", "%s:%s" % (ipv4, local_port)])
-                revert_commands.append(["iptables", "-t", "nat", "-D", "OUTPUT", "-d", public_ip, "-p", "tcp", "-m", "tcp", "--dport", str(port['port']), "-j", "DNAT", "--to-destination", "%s:%s" % (ipv4, local_port)])
-                log_good("[%s.relays.mullvad.net] %s:%s -> %s" % (public_hostname, public_ip, port['port'], local_port))
-            input("Press enter to revert local port forwardings...")
-        finally:
-            for revert_command in reversed(revert_commands):
-                run(revert_command)
-    finally:
-        request_logout(login)
-
-
 def move_command(args):
     become_root()
 
@@ -2723,9 +2574,6 @@ def reset_command(args):
     return config
 
 
-# NOTE: All wireguard servers have unique city codes. For all servers there is only one duplicate:
-#       - Finland (fi), Helsinki (hel) and
-#       - Sweden (se), Helsingborg (hel)
 def check_unique_city_codes(servers):
     country_cities = set([(server['country_code'], server['city_code']) for server in servers])
     city_counter = Counter([city for country, city in country_cities])
@@ -3270,11 +3118,6 @@ def vad():
 
     uninstall = subparsers.add_parser('uninstall', aliases=['un'], help='Uninstalles all services.')
     uninstall.set_defaults(func=uninstall_command)
-
-    port = subparsers.add_parser('port', help='Allocate and forward one or more ports of the exit server (country + city) to local ports. The command will wait while the forwardings are active.')
-    port.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
-    port.add_argument('LOCAL_PORT', nargs='*', help='Allocate one or more ports and forward them to the given local ports. Besides the local port numbers, the external ports numbers are also available. Port forwardings are only valid for a all server with the same country and city combination. You have no influence on the external port number. Usually an account has five port forwardings available, if you have none left, it will ask you to delete one or more ports from your mapped peers, so they can be reassigned.')
-    port.set_defaults(func=port_command)
 
     move = subparsers.add_parser('move', aliases=['mv'], help='Move device into physical namespace and if it does not exist create it.')
     move.add_argument('INTERFACE', nargs=1, help='Interface name that will be moved.')

@@ -197,36 +197,6 @@ $ vad -c /etc/vad/work.yaml up --dns atmpg eu  # Connect to a random server in t
 $ vad -c /etc/vad/work.yaml up                 # Connect to another random server in the European Union with the same nameserver.
 ```
 
-Portforwarding and game servers:
-
-```sh
-$ vad port 8888           # Forwards a random port (e.g. 55055) from your current exit to the local port 8888.
-<public-ip>:55055 -> 8888 # Normally you can not access this port with your exit ip address, but it will add nat rules with `iptables` so you can.
-                          # One port is allocated in your account, for your current exit peer. This port 55055 will stay the same as long as it is not deleted.
-                          # The command will wait until you press enter, then all local forwardings will be reverted.
-
-$ vad info
-$ vad down        # Will delete added nat rules.
-$ vad up          # Portforwardings do not survive a down and up, because the exit server could change.
-                  # But the port is still allocated in your account.
-
-$ vad list <country>      # Normally you want a game server close to the people who will use it.
-                          # And it should have a semi static ip address and a static port.
-                          # The ip address from your ISP will normally change daily.
-                          # This is a good alternative if you just want to start a server temporarly or from time to time
-                          # and do not want to deal with a changing address and ports.
-                          # Choice one hostname from the list. In our experience the ip address does not change (that often).
-$ vad up <hostname>                   # Use the hostname.
-$ vad port <game-server-port>         # This will allocate a differnt port from your account (e.g. 60606),
-<public-ip>:60606 -> <game-server-port>
-                                      # if you do not have ports left it will ask you which port you want to delete from your mapped peers.
-                                      # Now you can edit the configuration and add `*_pre` and `*_post` commands so everythings starts automatically.
-                                      # At least you need to add `vad port <game-server-port>` in `post_up`.
-$ vad down
-$ vad up
-$ vad port <game-server-port>         # The forwardings are active as long as `vad port` is running.
-```
-
 Reset:
 
 ```sh
@@ -245,7 +215,6 @@ $ # vad down
 * [ ] Add command `vad add` instead of `vad init -a`
 * [ ] Support adding external peers with `vad add`
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until it down.
-* [ ] Add `--static-exit-peer` to up command (useful if specific ports are mapped to this peer)
 * [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
 * [ ] Implement a configuration class and api request class
@@ -253,7 +222,6 @@ $ # vad down
 * [ ] A workaround for doubling wlan configuratoin exists now, but it needs to be revisied in the future.
   It would be better to move NetworkManager directly into the physical namespace. From testing this is possible and it sees the devices,
   but will not manage them (keyword: strictly unmanged), for whatever reason.
-* [ ] Always pick the peer with the most number of ports as exit where the city code matches
 * [ ] Use type hinting in conjunction with `mypy`.
   Instead of making python more statically typed it is a better idea to reimplement it in a statically typed language.
 
