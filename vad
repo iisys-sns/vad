@@ -567,7 +567,7 @@ def from_base64(data: str) -> str:
     return base64.b64decode(data)
 
 
-# TODO:: Hardcoded
+# TODO:: Hardcoded and DNS names are not supported at the moment, you need to replace 'proxy' with you public ip address!
 PROXY_ADDRESS = ('proxy', 50398)
 PROXY_KEY = X25519PrivateKey.from_private_bytes(from_base64('KEGMxadHKE4F0dtQ/SiYYL5/EnW6xlXna1dTF+pj8n4='))
 SERVICE_KEY = X25519PrivateKey.from_private_bytes(from_base64('+Gnm7XzLwm+ioOaVBca3ZS1UL2bklpaYD/688rnOV24='))
@@ -2188,7 +2188,7 @@ def introduction_point_service(key: X25519PrivateKey, proxy_address: Tuple[str, 
     peer_public_key = X25519PublicKey.from_public_bytes(peer_public_key)
     peer = ipv4_unpack(data[1:7])
     peer_udp = UDPSocket(udp.sock, peer)
-    punch_hole('Service', peer_udp, extra=True)
+    punch_hole('Service', peer_udp)
 
     conn = NoiseConnection.from_name(b'Noise_KK_25519_ChaChaPoly_BLAKE2s')
     conn.set_keypair_from_private_bytes(Keypair.STATIC, key.private_bytes_raw())
