@@ -775,7 +775,7 @@ def load_servers():
     return servers
 
 
-def filter_servers(type='wireguard', owned=None, active=None, country_city_hostname=None, diskless=None, servers=None):
+def filter_servers(type='wireguard', owned=None, active=None, country_city_hostname=None, servers=None):
     if servers is None:
         servers = load_servers()
 
@@ -801,9 +801,6 @@ def filter_servers(type='wireguard', owned=None, active=None, country_city_hostn
             servers = filter(lambda server: country_city_hostname in server['hostname'], servers)
         else:
             servers = []
-
-    if diskless is not None:
-        servers = filter(lambda server: server['stboot'] == diskless, servers)
 
     servers = list(servers)
     return servers
@@ -1088,7 +1085,6 @@ def config_rebuild_up_command(config, parser_up):
         'without_multihop'
         'uniform_by_country',
         'owned_entry',
-        'diskless_entry',
         'only_use_ipv6',
         'COUNTRY_CITY_HOSTNAME',
     ]
@@ -1508,14 +1504,13 @@ def write_wpa_supplicant_config(wifi_config):
         log_bad('Could not write configuration: %s (%s)' % (WPA_SUPPLICANT_CONF, str(e)))
 
 
-def path_selection(path: list[str], owned_entry: bool, diskless_entry: bool, uniform_by_country: bool, servers: list = None):
+def path_selection(path: list[str], owned_entry: bool, uniform_by_country: bool, servers: list = None):
     selected_path = [
         server_random_choice(
             filter_servers(
                 active=True,
                 owned=owned_entry if owned_entry else None,
                 country_city_hostname=path[0],
-                diskless=diskless_entry if diskless_entry else None,
                 servers=servers,
             ),
             uniform_by_country=uniform_by_country
@@ -1666,7 +1661,6 @@ def up_command(args, is_default):
     servers = path_selection(
         args.COUNTRY_CITY_HOSTNAME,
         owned_entry=args.owned_entry,
-        diskless_entry=args.diskless_entry,
         uniform_by_country=args.uniform_by_country,
         servers=servers
     )
@@ -1896,7 +1890,6 @@ def list_command(args):
         active=args.active,
         owned=args.owned,
         country_city_hostname=args.COUNTRY_CITY_HOSTNAME,
-        diskless=args.diskless,
         servers=servers
     )
 
@@ -3068,7 +3061,6 @@ def vad():
     up.add_argument('-w', '--without-multihop', action='store_true', help='Normally pairs of hops are taken and configured as multihop beginning from the last hop. Every hop pair requires one peer, with this option every hop requires one peer.')
     up.add_argument('-u', '--uniform-by-country', action='store_true', help='Randomly select a country and then randomly select a hop.')
     up.add_argument('-o', '--owned-entry', action='store_true', help='Use a owned server by Mullvad for your entry hop.')
-    up.add_argument('-b', '--diskless-entry', action='store_true', help='Use a diskless server for your entry hop (stboot [BETA]).')
     up.add_argument('-6', '--only-use-ipv6', action='store_true', help='Only use IPv6 addresses.')
     up.set_defaults(func=up_command)
 
@@ -3098,7 +3090,6 @@ def vad():
     list.add_argument('-r', '--rented', dest='owned', action='store_false', help='Filter by rented servers.', default=None)
     list.add_argument('-a', '--active', dest='active', action='store_true', help='Filter by active servers.', default=None)
     list.add_argument('-i', '--inactive', dest='active', action='store_false', help='Filter by inactive servers.', default=None)
-    list.add_argument('-b', '--diskless', action='store_true', help='Filter by diskless boot servers.', default=None)
     list.set_defaults(func=list_command)
 
     proxy = subparsers.add_parser('proxy', help='Start a proxy that will help an onion vpn service to connect to a client')
