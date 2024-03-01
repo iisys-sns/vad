@@ -7,6 +7,7 @@ import atexit
 import base64
 import ctypes
 import ctypes.util
+import dataclasses
 import dbus
 import errno
 import fcntl
@@ -48,7 +49,7 @@ from requests import Response
 from contextlib import redirect_stdout
 from functools import partial
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Callable
 
 import nacl.signing, nacl.public
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -411,6 +412,275 @@ class Proxy:
 
         if unkown:
             print('Proxy: Received an unkown message that will be ignored')
+
+
+class MullvadError(Exception):
+    pass
+
+
+class MullvadParseError(Exception):
+    pass
+
+
+@dataclasses.dataclass
+class MullvadBase:
+    def to_dict(self) -> str:
+        def serialize(object):
+            if isinstance(object, datetime):
+                return object.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+            else:
+                return str(object)
+        data = dataclasses.asdict(self)
+        for key, value in data.items():
+            data[key] = serialize(value)
+        return data
+
+    @staticmethod
+    def parse(ds: type, data: dict):
+        # NOTE: This requires that all fields a present and does basic type checking.
+        #       Additional type checking can be done in the subclasses.
+        for field in dataclasses.fields(ds):
+            if not field.name in data:
+                raise MullvadParseError("Missing field '%s'!")
+            data_type = type(data[field.name]).__name__
+            if field.type == 'datetime' and data_type == 'str':
+                pass
+            elif data_type != field.type:
+                raise MullvadParseError("Type missmatch for field '%s', should be %s but is %s!" % (field.name, field.type, data_type))
+            if field.type == 'datetime':
+                try:
+                    data[field.name] = datetime.strptime(data[field.name], "%Y-%m-%dT%H:%M:%S+00:00")
+                except Exception as e:
+                    raise MullvadParseError("Could not parse datetime field '%s' with '%s'!", field.name, data[field.name]) from e
+
+        return ds(**data)
+
+
+@dataclasses.dataclass
+class MullvadToken(MullvadBase):
+    access_token: str
+    expiry: datetime
+
+    @staticmethod
+    def from_dict(data: dict) -> MullvadToken:
+        return MullvadBase.parse(MullvadToken, data)
+
+
+@dataclasses.dataclass
+class MullvadAccount(MullvadBase):
+    id: str
+    expiry: datetime
+    max_ports: int
+    max_devices: int
+    can_add_ports: bool
+    can_add_devices: bool
+
+    @staticmethod
+    def from_dict(data: dict) -> MullvadAccount:
+        return MullvadBase.parse(MullvadAccount, data)
+
+    def is_active(self):
+        return self.expiry > datetime.now()
+
+    def can_add_peers(self):
+        return self.can_add_devices
+
+    def max_peers(self):
+        return self.max_devices
+
+
+@dataclasses.dataclass
+class MullvadPeer(MullvadBase):
+    id: str
+    name: str
+    pubkey: str
+    hijack_dns: bool
+    created: datetime
+    ipv4_address: str
+    ipv6_address: str
+    ports: list
+
+    @staticmethod
+    def from_dict(data: dict) -> MullvadPeer:
+        return MullvadBase.parse(MullvadPeer, data)
+
+
+@dataclasses.dataclass
+class MullvadRelay(MullvadBase):
+    hostname: str
+    country_code: str
+    country_name: str
+    city_code: str
+    city_name: str
+    fqdn: str
+    active: bool
+    owned: bool
+    provider: str
+    ipv4_addr_in: str
+    ipv6_addr_in: str
+    network_port_speed: int
+    stboot: bool
+    pubkey: str
+    multihop_port: int
+    socks_name: str
+    socks_port: int
+    daita: bool
+    type: str
+    status_messages: list
+
+    @staticmethod
+    def from_dict(data: dict) -> MullvadRelay:
+        return MullvadRelay.parse(MullvadRelay, data)
+
+
+class Mullvad:
+    def __init__(self):
+        self.api_url = "https://api.mullvad.net/"
+        self.session = requests.Session()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exception_type, exception_value, exception_traceback):
+        return False
+
+    def do(self, name: str, request: requests.Request, status_codes: List[int]):
+        try:
+            response = self.session.send(request.prepare())
+        except Exception as e:
+            raise MullvadError("%s failed!" % name) from e
+        if response.status_code not in status_codes:
+            if 'Content-Type' in response.headers and response.headers['Content-Type'] == 'application/json':
+                error = response.json()
+                if 'code' in error:
+                    raise MullvadError("%s failed! Got status code %d but expected one of %s. With error code: %s." % (name, response.status_code, status_codes, error['code']))
+            raise MullvadError("%s failed! Got status code %d but expected one of %s." % (name, response.status_code, status_codes))
+        return response
+
+    def connected(self):
+        response = self.do(
+            "Mullvad: Test if connected",
+            requests.Request('GET', 'https://ipv4.am.i.mullvad.net/json'),
+            [200],
+        )
+        data = response.json()
+        return data['mullvad_exit_ip'], data['ip']
+
+    def relays(self):
+        response = self.do(
+            "Mullvad: Fetch relays",
+            requests.Request('GET', 'https://api.mullvad.net/www/relays/all'),
+            [200],
+        )
+        relays = []
+        for relay in response.json():
+            if relay['type'] == 'wireguard':
+                relays.append(MullvadRelay.from_dict(relay))
+        return relays
+
+    def authenticate(self, account_number: str, access_token: Optional[MullvadToken] = None):
+        return MullvadAuth(account_number, access_token)
+
+
+class MullvadAuth(Mullvad):
+    def __init__(self, account_number: str, access_token: Optional[MullvadToken] = None):
+        self.account_number = account_number
+        self.access_token = access_token
+        super().__init__()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exception_type, exception_value, exception_traceback):
+        self.logout()
+        return False
+
+    def do_authenticated(self, name: str, request: requests.Request, status_codes: List[int]):
+        self.login()
+        request.headers['Authorization'] = f'Bearer {self.access_token.access_token}'
+        return self.do(name, request, status_codes)
+
+    def login(self):
+        if self.access_token is not None:
+            return
+        if self.access_token is not None and self.access_token.expiry > datetime.now():
+            return
+        response = self.do(
+            "Mullvad: Login",
+            requests.Request('POST', self.api_url + "auth/v1/token", json={'account_number': self.account_number}),
+            [200]
+        )
+        self.access_token = MullvadToken.from_dict(response.json())
+
+    def logout(self):
+        self.access_token = None
+        if self.session is not None:
+            self.session.close()
+
+    def account(self) -> MullvadAccount:
+        response = self.do_authenticated(
+            "Mullvad: Get account information",
+            requests.Request('GET', self.api_url + "accounts/v1/accounts/me"),
+            [200]
+        )
+
+        return MullvadAccount.from_dict(response.json())
+
+    def peers(self) -> List[MullvadPeer]:
+        response = self.do_authenticated(
+            "Mullvad: Get all wireguard peers (devices)",
+            requests.Request('GET', self.api_url + "accounts/v1/devices"),
+            [200]
+        )
+
+        peers = []
+        for peer in response.json():
+            peers.append(MullvadPeer.from_dict(peer))
+        return peers
+
+    def peer_by_public_key(self, public_key: str) -> MullvadPeer|None:
+        for peer in self.peers():
+            if peer.pubkey == public_key:
+                return peer
+        return None
+
+    def peer_create(self, public_key: str, hijack_dns: bool = True):
+        response = self.do_authenticated(
+            "Mullvad: Create wireguard peer",
+            requests.Request('POST', self.api_url + "accounts/v1/devices", json={'pubkey': public_key, 'hijack_dns': hijack_dns}),
+            [201]
+        )
+        return MullvadPeer.from_dict(response.json())
+
+    def peer_remove(self, public_key: str):
+        title = "Mullvad: Remove wireguard peer"
+
+        peer = self.peer_by_public_key(public_key)
+
+        if peer is None:
+            raise MullvadError('%s failed! Could not find peer with given public key!')
+
+        self.do_authenticated(
+            title,
+            requests.Request('DELETE', self.api_url + f"accounts/v1/devices/{peer.id}"),
+            [204]
+        )
+
+    def peer_update_pubkey(self, public_key: str, public_key_new: str, hijack_dns: bool = True):
+        title = "Mullvad: Update public key of wireguard peer"
+
+        peer = self.peer_by_public_key(public_key)
+
+        if peer is None:
+            raise MullvadError('%s failed! Could not find peer with given public key!')
+
+        response = self.do_authenticated(
+            title,
+            requests.Request('PUT', self.api_url + f"accounts/v1/devices/{peer.id}/pubkey", json={'pubkey': public_key_new, 'hijack_dns': hijack_dns}),
+            [200]
+        )
+
+        return MullvadPeer.from_dict(response.json())
 
 
 def punch_hole(name, udp: UDPSocket, number_of_messages=10):
@@ -855,174 +1125,6 @@ def user_request_account_number(passname, config):
         return account_number
 
 
-def request_login(account_number):
-    log_verbose('request login...', end='')
-    try:
-        response = requests.get("https://api.mullvad.net/www/accounts/%s/" % account_number)
-    except Exception as e:
-        log_fatal("Error while sending request to login (%s)!" % (str(e)))
-    log_verbose('%s' % response.status_code)
-    if not response.ok:
-        log_fatal("Could not login into account (%d:%s)!" % (response.status_code, response.text))
-    try:
-        return response.json()
-    except Exception as e:
-        log_fatal("Could not parse account information (%s)!" % (str(e)))
-
-
-def request_account(login):
-    try:
-        log_verbose('request account...', end='')
-        response = requests.get(
-            "https://api.mullvad.net/www/me",
-            headers=dict(
-                Authorization='Token %s' % login['auth_token']
-            ),
-        )
-        log_verbose('%s' % response.status_code)
-    except Exception as e:
-        log_fatal("Error while sending request to receive account information (%s)!" % (str(e)))
-    if not response.ok:
-        log_fatal("Could not receive account information (%d:%s)!" % (response.status_code, response.text))
-    try:
-        return response.json()
-    except Exception as e:
-        log_fatal("Could not parse account information (%s)!" % (str(e)))
-
-
-def request_login_api(args, account_number, config):
-    auth = config.get('auth', None)
-    if auth:
-        expires = datetime.strptime(auth['api_expiry'], "%Y-%m-%dT%H:%M:%S+00:00")
-        if expires > datetime.now():
-            return config
-
-    try:
-        log_verbose('request login api...', end='')
-        response = requests.post(
-            'https://api.mullvad.net/auth/v1/token',
-            json=dict(
-                account_number=account_number
-            )
-        )
-        log_verbose('%s' % response.status_code)
-    except Exception as e:
-        log_fatal("Error while sending request to login into api (%s)!" % (str(e)))
-
-    if not response.ok:
-        log_fatal("Could not login into api (%d:%s)!" % (response.status_code, response.text))
-
-    try:
-        # {'access_token': '...', 'expiry': 'YYYY-mm-ddTHH:MM:SS+00:00'}
-        app = response.json()
-    except Exception as e:
-        log_fatal("Could not parse api login response (%s)!" % (str(e)))
-
-    config['auth'] = dict(
-        api_token=app['access_token'],
-        api_expiry=app['expiry'],
-    )
-
-    return config_save(args.config, config)
-
-
-def request_add_key(login):
-    private_key = generate_private_key()
-    public_key = get_public_key(private_key)
-    log_verbose('request add key...', end='')
-    try:
-        response = requests.post(
-            "https://api.mullvad.net/www/wg-pubkeys/add/",
-            headers=dict(
-                Authorization='Token %s' % login['auth_token']
-            ),
-            json=dict(
-                pubkey=public_key
-            )
-        )
-    except Exception as e:
-        log_fatal("Error while sending request to adding new public key (%s)!" % (str(e)))
-    log_verbose('%s' % response.status_code)
-    if not response.ok:
-        log_fatal("Could not add new public key to account (%d:%s)!" % (response.status_code, response.text))
-    try:
-        peer = response.json()
-    except Exception as e:
-        log_fatal("Adding new public key: Could not parse response (%s:%s)!" % (response.text, str(e)))
-    if peer['key']['public'] != public_key:
-        log_fatal("Adding new public key: Public key in response should be equal to sended public key, but is not (%s (response) != %s (sended))!" % (peer['key']['public'], public_key))
-    return (private_key, peer)
-
-
-def request_update_public_key(config, peer):
-    assert peer['provider'] == 'mullvad'
-
-    if not 'peer_id' in peer:
-        return
-
-    private_key = generate_private_key()
-    public_key = get_public_key(private_key)
-
-    try:
-        log_verbose('request update public key...', end='')
-        response = requests.put(
-            "https://api.mullvad.net/accounts/v1/devices/%s/pubkey" % peer['peer_id'],
-            headers=dict(
-                Authorization='Bearer %s' % config['auth']['api_token']
-            ),
-            json=dict(
-                pubkey=public_key
-            )
-        )
-        log_verbose('%s' % response.status_code)
-    except Exception as e:
-        log_fatal("Error while sending request to update public key for peer %s (%s)!" % (peer['peer_id'], str(e)))
-    if not response.ok:
-        log_fatal("Could not update public key to account (%d:%s)!" % (response.status_code, response.text))
-
-    try:
-        peer = response.json()
-    except Exception as e:
-        log_fatal("Update public key: Could not parse response (%s:%s)!" % (response.text, str(e)))
-    if peer['pubkey'] != public_key:
-        log_fatal("Update public key: Public key in response should be equal to sended public key, but is not (%s (response) != %s (sended))!" % (peer['pubkey'], public_key))
-
-    return private_key, peer
-
-
-def request_revoke_key(login, public_key):
-    log_verbose('request revoke key %s...' % public_key, end='')
-    try:
-        response = requests.post(
-            "https://api.mullvad.net/www/wg-pubkeys/revoke/",
-            headers=dict(
-                Authorization='Token %s' % login['auth_token']
-            ),
-            json=dict(
-                pubkey=public_key
-            )
-        )
-    except Exception as e:
-        log_fatal("Error while sending request to revoke public key (%s)!" % (str(e)))
-    log_verbose('%s' % response.status_code)
-    return response.ok
-
-
-def request_logout(login):
-    log_verbose('request logout...', end='')
-    try:
-        response = requests.post(
-            "https://api.mullvad.net/www/expire-auth-token/",
-            headers=dict(
-                Authorization='Token %s' % login['auth_token']
-            )
-        )
-    except Exception as e:
-        log_fatal("Error while sending request to logout (%s)!" % (str(e)))
-    log_verbose('%s' % response.status_code)
-    return response.ok
-
-
 def config_load(filename):
     if not os.path.exists(filename):
         return False
@@ -1132,32 +1234,34 @@ def init_command(args):
         update_command(None)
 
     account_number = user_request_account_number(args.passname, config)
-    login = request_login(account_number)
 
-    try:
-        account = login['account']
+    access_token = None
+    if 'mullvad' in config:
+        access_token = MullvadToken.from_dict(config['mullvad'])
 
-        if not account['active']:
+    with Mullvad().authenticate(account_number, access_token) as mullvad:
+        mullvad.login()
+        config['mullvad'] = mullvad.access_token.to_dict()
+
+        account = mullvad.account()
+
+        if not account.is_active():
             log_fatal('Your account is expired (since %s)!' % account['expires'])
 
-        if not account['can_add_wg_peers']:
+        if not account.can_add_peers():
             log_fatal('You can not add more peers to your account, your account is full!' )
 
-        added_private_key, added_peer = request_add_key(login)
+        private_key = generate_private_key()
+        public_key = get_public_key(private_key)
 
-        account = request_account(login)
+        peer: MullvadPeer = mullvad.peer_create(public_key)
 
-        for peer in account['account']['wg_peers']:
-            if peer['key']['public'] == added_peer['key']['public']:
-                config['peers'].append(dict(
-                    private_key=added_private_key,
-                    ipv4=peer['ipv4_address'],
-                    ipv6=peer['ipv6_address'],
-                    peer_id=peer['device_id'],
-                    peer_name=peer['device_name'],
-                    provider='mullvad',
-                ))
-                break
+        config['peers'].append(dict(
+            private_key=private_key,
+            ipv4=peer.ipv4_address,
+            ipv6=peer.ipv6_address,
+            provider='mullvad',
+        ))
 
         if args.dont_save_account_number:
             if 'account_number' in config:
@@ -1171,8 +1275,6 @@ def init_command(args):
             log_info('First peer added (you can now use `vad up`)')
         else:
             log_info('New peer added')
-    finally:
-        request_logout(login)
 
     return config
 
@@ -1186,7 +1288,7 @@ def delete_command(args):
         log_warn('Specify a INDEX or use `--all`')
         raise Abort()
     elif args.all:
-        peers = config['peers']
+        peers = config['peers'][:]
     else:
         index = int(args.INDEX[0])
         if index < len(config['peers']):
@@ -1197,19 +1299,22 @@ def delete_command(args):
             return
 
     account_number = user_request_account_number(args.passname, config)
-    login = request_login(account_number)
 
-    try:
+    access_token = None
+    if 'mullvad' in config:
+        access_token = MullvadToken.from_dict(config['mullvad'])
+
+    with Mullvad().authenticate(account_number) as mullvad:
+        mullvad.login()
+        config['mullvad'] = mullvad.access_token.to_dict()
+
         for peer in peers:
             public_key = get_public_key(peer['private_key'])
-            request_revoke_key(login, public_key)
+            mullvad.peer_remove(public_key)
             config['peers'].remove(peer)
             log_info("Deleted peer %s!" % (public_key))
-        config = config_save(args.config, config)
-    finally:
-        request_logout(login)
 
-    return config
+        return config_save(args.config, config)
 
 
 def generate_private_key() -> str:
@@ -1229,12 +1334,10 @@ def get_public_key(private_key: str) -> str:
     return str(stdout, 'utf8').strip()
 
 
-def get_this_peer(peer, login):
+def get_this_peer(peer, mullvad: MullvadAuth):
     if peer is not None:
         public_key = get_public_key(peer['private_key'])
-        for wg_peer in login['account']['wg_peers']:
-            if wg_peer['key']['public'] == public_key:
-                return wg_peer
+        return mullvad.peer_by_public_key(public_key)
     return None
 
 
@@ -1245,22 +1348,24 @@ def get_city_ports(city_ports):
     return ports
 
 
-def print_peer_table(peers, this_peers, show_ipv6, show_peer_id):
-    add_peer = lambda current, peer: table.add_row([
-            current,
-            '✓' if peer['app'] else '',
-            peer['created']] +
-            ([peer['device_id']] if show_peer_id else []) +
-            [peer['device_name'].title(),
-            peer['ipv4_address']] +
-            ([peer['ipv6_address']] if show_ipv6 else []) +
-            [peer['key']['public'],
-            '✓' if peer['can_add_ports'] else '',
-            '\n'.join([str(port) for port in  peer['ports']]),
-            '\n'.join(get_city_ports(peer['city_ports']))
-        ])
+    id: str
+    name: str
+    pubkey: str
+    hijack_dns: bool
+    created: datetime
+    ipv4_address: str
+    ipv6_address: str
+    ports: list
+def print_peer_table(peers: List[MullvadPeer], mapped_peers, show_ipv6, show_peer_id):
+    add_peer = lambda current, peer: table.add_row(
+        [current, peer.created] +
+        ([peer.id] if show_peer_id else []) +
+        [peer.name.title(), peer.ipv4_address] +
+        ([peer.ipv6_address] if show_ipv6 else []) +
+        [peer.pubkey]
+    )
 
-    fields = ['Index','By App', 'Created']
+    fields = ['Index', 'Created']
 
     if show_peer_id:
         fields.append('ID')
@@ -1270,18 +1375,18 @@ def print_peer_table(peers, this_peers, show_ipv6, show_peer_id):
     if show_ipv6:
         fields.append('IPv6')
 
-    fields.extend(['Public Key', 'Can Add Ports', 'Ports', 'City Ports'])
+    fields.extend(['Public Key'])
 
     table = PrettyTablePretty(fields)
 
     table.align['Name'] = 'l'
     table.align['IPv4'] = 'r'
     table.align['IPv6'] = 'r'
-    for idx, peer in enumerate(this_peers):
+    for idx, peer in enumerate(mapped_peers):
         if peer:
             add_peer(str(idx), peer)
     for peer in peers:
-        if peer in this_peers:
+        if peer in mapped_peers:
             continue
         add_peer('', peer)
     print(table)
@@ -1292,70 +1397,55 @@ def info_command(args, parser_up):
 
     config = config_load(args.config)
     account_number = user_request_account_number(args.passname, config)
-    login = request_login(account_number)
 
-    try:
-        peers = []
-        if config:
+    access_token = None
+    if 'mullvad' in config:
+        access_token = MullvadToken.from_dict(config['mullvad'])
+
+    with Mullvad().authenticate(account_number, access_token) as mullvad:
+        mullvad.login()
+        config['mullvad'] = mullvad.access_token.to_dict()
+        config = config_save(args.config, config)
+
+        account = mullvad.account()
+        peers = mullvad.peers()
+
+        mapped_peers = []
+        if config and 'peers' in config:
             for peer in config['peers']:
-                peer_mullvad = get_this_peer(peer, login)
-                peers.append(peer_mullvad)
+                peer_mullvad = get_this_peer(peer, mullvad)
+                mapped_peers.append(peer_mullvad)
 
-        if args.raw:
-            for peer in peers:
-                print(yaml.dump(peer), end='')
-                print('---')
-            print(yaml.dump(login['account']), end='')
+        print('Account number: ', end='')
+        if args.show_account_number:
+            print('(%s)' % account_number)
         else:
-            account = login['account']
+            print('*' * 16)
 
-            print('Account number: ', end='')
-            if args.show_account_number:
-                log_info(account['pretty_token'], highlight=True, end=' ')
-                print('(%s)' % account['token'])
-            else:
-                print('*' * 16)
+        delta = account.expiry - datetime.now()
+        if account.is_active():
+            print('Expires:', end=' ')
+            log_good(str(account.expiry), end=' ')
+            print('(in %d days)' % delta.days)
+        else:
+            print('Expired:', end=' ')
+            log_bad(str(account.expiry), end=' ')
+            print('(since %d days)' % (-1*delta.days))
 
-            expires = datetime.strptime(account['expires'], "%Y-%m-%dT%H:%M:%S+00:00")
-            delta = expires - datetime.now()
-            if account['active']:
-                print('Expires:', end=' ')
-                log_good(str(expires), end=' ')
-                print('(in %d days)' % delta.days)
-            else:
-                print('Expired:', end=' ')
-                log_bad(str(expires), end=' ')
-                print('(since %d days)' % (-1*delta.days))
+        print('Peers: ', end='')
+        peers_text = '%s/%s' % (len(peers), account.max_peers())
+        if account.can_add_peers():
+            log_good(peers_text)
+        else:
+            log_warn(peers_text)
 
-            print('Subscription: %s' % account['subscription'])
-
-            print('Peers: ', end='')
-            peers_text = '%s/%s' % (len(account['wg_peers']), account['max_wg_peers'])
-            if account['can_add_wg_peers']:
-                log_good(peers_text)
-            else:
-                log_warn(peers_text)
-
-            print('Ports: ', end='')
-            ports = '%s/%s' % (len(account['ports']), account['max_ports'])
-            if account['can_add_ports']:
-                log_good(ports)
-            else:
-                log_warn(ports)
-
-            for city_port in account['city_ports']:
-                print('- %s-%s' % (city_port['city_code'], city_port['port']))
-            print()
-            print_peer_table(account['wg_peers'], peers, args.show_ipv6, args.show_peer_ids)
-            print()
-            log_info('If you only call `vad up` this command will be executed: ', end='')
-            print(config_rebuild_up_command(
-                config,
-                parser_up))
-    except Exception as e:
-        log_fatal('Error while trying to show account information (%s)!' % str(e))
-    finally:
-        request_logout(login)
+        print()
+        print_peer_table(peers, mapped_peers, args.show_ipv6, args.show_peer_ids)
+        print()
+        log_info('If you only call `vad up` this command will be executed: ', end='')
+        print(config_rebuild_up_command(
+            config,
+            parser_up))
 
 
 def show_command(args):
@@ -2525,18 +2615,26 @@ def rotate_command(args, up_command_defaults):
 
     config = config_load(args.config)
     account_number = user_request_account_number(args.passname, config)
-    config = request_login_api(args, account_number, config)
 
-    for config_peer in config.get('peers', []):
-        if not config_peer['provider'] == 'mullvad':
-            continue
-        private_key, peer = request_update_public_key(config, config_peer)
-        config_peer['private_key'] = private_key
-        config_peer['ipv4'] = peer['ipv4_address']
-        config_peer['ipv6'] = peer['ipv6_address']
-        config_peer['peer_id'] = peer['id']
-        config_peer['peer_name'] = peer['name']
-        config_save(args.config, config)
+    access_token = None
+    if 'mullvad' in config:
+        access_token = MullvadToken.from_dict(config['mullvad'])
+
+    with Mullvad().authenticate(account_number, access_token) as mullvad:
+        mullvad.login()
+        config['mullvad'] = mullvad.access_token.to_dict()
+
+        for config_peer in config.get('peers', []):
+            if not config_peer['provider'] == 'mullvad':
+                continue
+            private_key_new = generate_private_key()
+            public_key_new = get_public_key(private_key_new)
+            public_key = get_public_key(config_peer['private_key'])
+            peer = mullvad.peer_update_pubkey(public_key, public_key_new)
+            config_peer['private_key'] = private_key_new
+            config_peer['ipv4'] = peer.ipv4_address
+            config_peer['ipv6'] = peer.ipv6_address
+            config_save(args.config, config)
 
     log_success("Successfully rotated WireGuard keys of all mapped peers")
 
@@ -2688,64 +2786,6 @@ class TestCase(unittest.TestCase):
         return out.getvalue()
 
 
-class TestCommand(TestCase):
-    def load_config(self):
-        self.called[inspect.currentframe().f_code.co_name] = True
-        return self.config
-
-    def update_command(self, args):
-        self.called[inspect.currentframe().f_code.co_name] = True
-
-    def request_account_number(self, passname, config):
-        self.called[inspect.currentframe().f_code.co_name] = True
-        return self.request_account_number_result
-
-    def request_login(self, login):
-        self.called[inspect.currentframe().f_code.co_name] = True
-        return self.request_login_result
-
-    def request_logout(self, login):
-        self.called[inspect.currentframe().f_code.co_name] = True
-
-    def request_add_key(self, login):
-        self.called[inspect.currentframe().f_code.co_name] = True
-        return self.request_add_key_result
-
-    def save_config(self, config):
-        self.called[inspect.currentframe().f_code.co_name] = True
-        self.config = config
-
-    def setUp(self):
-        self.called = dict()
-        self.config = None
-        self.request_login_result = dict(account=dict(
-            active=True,
-            can_add_wg_peers=True,
-            expires='NEVER',
-        ))
-        self.request_add_key_result = (
-            'PRIVATE',
-            dict(
-                ipv4_address='4',
-                ipv6_address='6'
-            )
-        )
-        self.request_account_number_result = '1234567890123456'
-
-        module = self.save_main_module()
-        module.become_root = lambda: None
-        module.load_config = self.load_config
-        module.save_config = self.save_config
-        module.update_command = self.update_command
-        module.request_account_number = self.request_account_number
-        module.request_login = self.request_login
-        module.request_add_key = self.request_add_key
-        module.request_logout = self.request_logout
-
-    def tearDown(self):
-        self.restore_main_module()
-
-
 class TestServerRandomChoice(TestCase):
     def test(self):
         import numpy as np
@@ -2810,119 +2850,39 @@ class TestGetDnsServerFromFlags(TestCase):
             self.assertEqual(dns, get_dns_server_from_flags(flags), "Used flags: %s" % flags)
 
 
-class TestRequestLogin(TestCase):
-    def call(self):
-        request_login('1234567890123456')
-
-    def tearDown(self):
-        from importlib import reload
-        reload(sys.modules["requests"])
-
-    def test404(self):
-        self.inject_get_response(404, 'ACCOUNT_NOT_FOUND')
-        out = self.capture(partial(self.assertExit, self.call))
-        self.assertTrue('ACCOUNT_NOT_FOUND', out)
-
-    def testException(self):
-        requests.get = self.throw_exception
-        out = self.capture(partial(self.assertExit, self.call))
-        self.assertIn('while sending', out)
-
-    def testJson(self):
-        self.inject_get_response(200, 'NOTJSON')
-        out = self.capture(partial(self.assertExit, self.call))
-        self.assertIn('not parse', out)
-
+class TestMullvadIntegration(unittest.TestCase):
     def test(self):
-        self.inject_get_response(200, '{}')
-        out = self.capture(self.call)
-        self.assertTrue(out == '')
+        import base64
 
+        with Mullvad() as api:
+            connected = api.connected()
+            self.assertEqual(len(connected), 2)
+            self.assertEqual(type(connected[0]), bool)
+            self.assertEqual(type(connected[1]), str)
 
-class TestInitCommand(TestCommand):
-    def testSaveAccountNumber(self):
-        out = self.capture(partial(init_command, Namespace(
-            save_account_number=True,
-            passname='pasname'
-        )))
-        self.assertTrue(self.called['save_config'])
-        self.assertEqual(self.config['account_number'], self.request_account_number_result)
+            relays = api.relays()
+            self.assertTrue(len(relays) > 200)
+            self.assertEqual(type(relays[0]), MullvadRelay)
 
-    def testConfigUnchanged(self):
-        self.config = dict(
-            save_account_number=False,
-            account_number='TEST',
-        )
-        out = self.capture(partial(init_command, Namespace(
-            add_peer=False,
-            save_account_number=False,
-            passname='pasname'
-        )))
-        self.assertTrue(self.called['save_config'])
-        self.assertIn('account_number', self.config)
+            with api.authenticate(user_request_account_number('web/mullvad', dict())) as auth:
+                public_key = str(base64.encodebytes(os.urandom(32)), 'utf8').strip()
+                public_key2 = str(base64.encodebytes(os.urandom(32)), 'utf8').strip()
 
-    def testAddPeer(self):
-        self.config = dict(
-            peers=[dict()]
-        )
-        out = self.capture(partial(init_command, Namespace(
-            save_account_number=False,
-            add_peer=True,
-            passname='pasname'
-        )))
-        self.assertIn('added', out)
-        self.assertEqual(len(self.config['peers']), 2)
+                account = auth.account()
+                self.assertTrue(account.is_active())
+                self.assertTrue(account.can_add_peers())
 
-    def testAlreadyInitialized(self):
-        self.config = dict(
-            peers=[dict()]
-        )
-        out = self.capture(partial(self.assertExit, partial(init_command, Namespace(
-            save_account_number=False,
-            add_peer=False,
-            passname='pasname'
-        ))))
-        self.assertIn('Already', out)
+                peers = auth.peers()
 
-    def testNotActive(self):
-        self.request_login_result['account']['active'] = False
-        out = self.capture(partial(self.assertExit, partial(init_command, Namespace(
-            save_account_number=False,
-            add_peer=True,
-            passname='pasname'
-        ))))
-        self.assertIn('NEVER', out)
-        self.assertTrue(self.called['request_logout'])
+                peer = auth.peer_create(public_key)
+                self.assertEqual(peer.pubkey, public_key)
+                self.assertEqual(len(peers)+1, len(auth.peers()))
 
-    def testNoMorePeers(self):
-        self.request_login_result['account']['can_add_wg_peers'] = False
-        out = self.capture(partial(self.assertExit, partial(init_command, Namespace(
-            save_account_number=False,
-            add_peer=True,
-            passname='pasname'
-        ))))
-        self.assertIn('full', out)
-        self.assertTrue(self.called['request_logout'])
+                peer = auth.peer_update_pubkey(public_key, public_key2)
+                self.assertEqual(peer.pubkey, public_key2)
 
-    def test(self):
-        out = self.capture(partial(init_command, Namespace(
-            save_account_number=False,
-            add_peer=True,
-            passname='pasname'
-        )))
-        self.assertIn('First peer added', out)
-        self.assertTrue(self.called['update_command'])
-        self.assertTrue(self.called['request_login'])
-        self.assertTrue(self.called['request_logout'])
-        self.assertTrue(self.called['request_add_key'])
-        self.assertEqual(
-            self.config,
-            dict(peers=[dict(
-                private_key='PRIVATE',
-                ipv4='4',
-                ipv6='6',
-            )])
-        )
+                auth.peer_remove(public_key2)
+                self.assertEqual(len(peers), len(auth.peers()))
 
 
 class TestOnionVpnUrl(unittest.TestCase):
@@ -3045,7 +3005,6 @@ def vad():
     info.add_argument('-a', '--show-account-number', action='store_true', help='Shows the account number.')
     info.add_argument('-s', '--show-peer-ids', action='store_true', help='Show peer ids.')
     info.add_argument('-6', '--show-ipv6', action='store_true', help='Show IPv6 address column of peer.')
-    info.add_argument('-r', '--raw', action='store_true', help='Output raw account information.')
     info.set_defaults(func=info_command)
 
     update = subparsers.add_parser('update', help='Update or initialize server list.')

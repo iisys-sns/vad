@@ -214,7 +214,7 @@ $ # vad down
   The state information could live in `/var/run/vad/state`.
 * [ ] Add command `vad add` instead of `vad init -a`
 * [ ] Support adding external peers with `vad add`
-* [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until it down.
+* [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until down.
 * [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
 * [ ] Implement a configuration class and api request class
@@ -224,6 +224,13 @@ $ # vad down
   but will not manage them (keyword: strictly unmanged), for whatever reason.
 * [ ] Use type hinting in conjunction with `mypy`.
   Instead of making python more statically typed it is a better idea to reimplement it in a statically typed language.
+* [X] The implemented API is deprecated. There is [API documentation](https://api.mullvad.net/app/documentation/#/paths/~1v1~1submit-voucher/post),
+  but some of the needed functionallity is deprecated. We need at least:
+    * [X] Get relays ([here](https://github.com/mullvad/mullvadvpn-app/blob/main/mullvad-api/src/relay_list.rs))
+    * [X] Login ([here](https://github.com/mullvad/mullvadvpn-app/blob/main/mullvad-api/src/access.rs))
+    * [X] Get info about account ([here](https://github.com/mullvad/mullvadvpn-app/blob/main/mullvad-api/src/lib.rs))
+    * [X] Add/Get/Replace Devices/WireGuard public keys ([here](https://github.com/mullvad/mullvadvpn-app/blob/main/mullvad-api/src/device.rs))
+  The most up to date information can be found [here](https://github.com/mullvad/mullvadvpn-app/tree/main/mullvad-api).
 
 ## Ideas
 
