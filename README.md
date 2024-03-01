@@ -76,7 +76,7 @@ network={
 }
 ```
 
-If you do not want do configure it manually and; have NetworkManager; currently connected to an wifi network; and; `wpa_supplicant` is used, you can execute this command.
+If you do not want do configure it manually and; have NetworkManager; currently connected to an wifi network; and; `wpa_supplicant` is used, you can execute the following command.
 Be aware that this is only a workaround.
 
 ```sh
