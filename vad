@@ -1222,15 +1222,11 @@ def init_command(args):
 
     config = config_load(args.config)
 
-    if isinstance(config, dict):
-        if not 'peers' in config:
-            config['peers'] = []
-        if not args.add_peer and len(config['peers']) > 0:
-            log_fatal('Already initialized with at least one peer. If you want to add a new peer, use `--add-peer`.')
-    else:
-        config = dict(peers=[])
+    peers = config.get('peers', [])
+    if len(peers) > 0:
+        log_fatal('Already initialized with at least one peer. If you want to add a new peer, use `vad add`.')
 
-    if len(config['peers']) == 0:
+    if len(peers) == 0:
         update_command(None)
 
     account_number = user_request_account_number(args.passname, config)
@@ -1242,6 +1238,36 @@ def init_command(args):
     with Mullvad().authenticate(account_number, access_token) as mullvad:
         mullvad.login()
         config['mullvad'] = mullvad.access_token.to_dict()
+        config = config_save(args.config, config)
+        config = add_command(args)
+
+        if args.dont_save_account_number:
+            if 'account_number' in config:
+                del config['account_number']
+        else:
+            config['account_number'] = account_number
+
+        config = config_save(args.config, config)
+        log_info('Initialized with one peer, you can now use `vad up`')
+
+    return config
+
+
+def add_command(args):
+    become_root()
+
+    config = config_load(args.config)
+
+    account_number = user_request_account_number(args.passname, config)
+
+    access_token = None
+    if 'mullvad' in config:
+        access_token = MullvadToken.from_dict(config['mullvad'])
+
+    with Mullvad().authenticate(account_number, access_token) as mullvad:
+        mullvad.login()
+        config['mullvad'] = mullvad.access_token.to_dict()
+        config = config_save(args.config, config)
 
         account = mullvad.account()
 
@@ -1249,7 +1275,7 @@ def init_command(args):
             log_fatal('Your account is expired (since %s)!' % account['expires'])
 
         if not account.can_add_peers():
-            log_fatal('You can not add more peers to your account, your account is full!' )
+            log_fatal('You can not add more peers to your account, your account is full!')
 
         private_key = generate_private_key()
         public_key = get_public_key(private_key)
@@ -1263,18 +1289,8 @@ def init_command(args):
             provider='mullvad',
         ))
 
-        if args.dont_save_account_number:
-            if 'account_number' in config:
-                del config['account_number']
-        else:
-            config['account_number'] = account_number
-
         config = config_save(args.config, config)
-
-        if len(config['peers']) == 1:
-            log_info('First peer added (you can now use `vad up`)')
-        else:
-            log_info('New peer added')
+        log_info('New peer added')
 
     return config
 
@@ -2988,11 +3004,14 @@ def vad():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    init = subparsers.add_parser('init', help='Initalize Mullvad VPN. Adds peers to this computer. Without arguments, adds a new peer to your account to this computer (will ask for your account number)', **subparser_args)
+    init = subparsers.add_parser('init', help='Initalize Mullvad VPN by asking the user for the account number and adding one peer. The account number will be saved.', **subparser_args)
     init.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
-    init.add_argument('-a', '--add-peer', action='store_true', help='Creates an additonal peer for your account to built tunnels over more hops. Every new peers enables one hop. In a multihop configuration (https://mullvad.net/de/help/multihop-wireguard) every peers enables two hops. Normally 5 peers are possible per account, this allows a maximum of ten hops.')
     init.add_argument('-d', '--dont-save-account-number', action='store_true', help='Does not save the account number into the configuration file. Useful if you have the account number in `pass`.')
     init.set_defaults(func=init_command)
+
+    add = subparsers.add_parser('add', help='Adding a new peer from your account to this computer. Every new peer enables at least one hop. In a multihop configuration (https://mullvad.net/de/help/multihop-wireguard) every peer enables two hops. Normally 5 peers are possible per account, this allows a maximum of ten hops.', **subparser_args)
+    add.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
+    add.set_defaults(func=add_command)
 
     delete = subparsers.add_parser('delete', help='Delete mapped peer(s) from this computer and your account.', **subparser_args)
     delete.add_argument('--all', action='store_true', help='Delete all mapped peers.')
