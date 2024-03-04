@@ -64,6 +64,7 @@ PREFIX = '/etc'
 NAME = 'vad'
 RUN_DIR = '/var/run/vad'
 LOCK_FILE = f'{RUN_DIR}/lock'
+LOCK_FD = None
 WIREGUARD_DIR = f'{PREFIX}/wireguard'
 WIREGUARD_CONFIG = f'{WIREGUARD_DIR}/{NAME}-%s-%s.conf'
 NAMESPACE_HOP = f'{NAME}%d'
@@ -755,11 +756,15 @@ def lock():
     fcntl.lockf(fd, fcntl.LOCK_EX)
     fd.write('%s\n' % os.getpid())
     fd.flush()
-    atexit.register(lambda: partial(unlock, fd)())
+    LOCK_FD = fd
     already_locked = True
+    atexit.register(unlock)
 
 
-def unlock(fd):
+def unlock():
+    if LOCK_FD is None:
+        return
+    fd = LOCK_FD
     sys.stdout.flush()
     fcntl.lockf(fd, fcntl.LOCK_UN)
     fd.truncate(0)
