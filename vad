@@ -608,8 +608,6 @@ class MullvadAuth(Mullvad):
         return self.do(name, request, status_codes)
 
     def login(self):
-        if self.access_token is not None:
-            return
         if self.access_token is not None and self.access_token.expiry > datetime.now():
             return
         response = self.do(
