@@ -1727,6 +1727,31 @@ def create_hop_table(hops, without_multihop, title):
     return table
 
 
+def physical_namespace_set_up():
+    physical_already_existed = network_namespace_exists(NAMESPACE_PHYSICAL)
+
+    if physical_already_existed:
+        return True
+
+    if args.auto_configure_wifi:
+        wifi_config = workaround_fetch_current_wifi_configuration()
+        if wifi_config is not None:
+            write_wpa_supplicant_config(wifi_config)
+
+    create_network_namespace(NAMESPACE_PHYSICAL)
+
+    run(["timeout", "-s", "KILL", "5", "killall", "-w", "wpa_supplicant", "dhcpcd"], failure_ok=True)
+    run(["mkdir", "-p", "/etc/netns/physical"])
+    run(["rm", "-f", "/etc/netns/physical/resolv.conf"])
+    run(["touch", "/etc/netns/physical/resolv.conf"])
+
+    for device in get_network_devices():
+        if device[0] != DeviceType.Virtual:
+            device_move_to_physical(device)
+
+    return False
+
+
 def up_command(args, is_default):
     become_root()
 
@@ -1794,13 +1819,9 @@ def up_command(args, is_default):
         log_verbose("Was already active, do a partial tear down.")
         config = down_command(Namespace(config=args.config, partial=True))
 
-    physical_already_existed = network_namespace_exists(NAMESPACE_PHYSICAL)
+    physical_already_existed = physical_namespace_set_up()
 
     if not physical_already_existed:
-        if args.auto_configure_wifi:
-            wifi_config = workaround_fetch_current_wifi_configuration()
-            if wifi_config is not None:
-                write_wpa_supplicant_config(wifi_config)
         config_execute_commands(config, 'pre_up')
 
     print(table_hops)
@@ -1817,8 +1838,6 @@ def up_command(args, is_default):
 
     namespaces = []
     namespaces.append(NAMESPACE_PHYSICAL)
-    if not network_namespace_exists(NAMESPACE_PHYSICAL):
-        create_network_namespace(NAMESPACE_PHYSICAL)
     for idx in range(1, len(hops)):
         namespaces.insert(1, NAMESPACE_HOP % idx)
         create_network_namespace(NAMESPACE_HOP % idx)
@@ -1856,16 +1875,6 @@ def up_command(args, is_default):
         )
 
         mtu -= 80
-
-    if not physical_already_existed:
-        run(["timeout", "-s", "KILL", "5", "killall", "-w", "wpa_supplicant", "dhcpcd"], failure_ok=True)
-        run(["mkdir", "-p", "/etc/netns/physical"])
-        run(["rm", "-f", "/etc/netns/physical/resolv.conf"])
-        run(["touch", "/etc/netns/physical/resolv.conf"])
-
-    for device in get_network_devices():
-        if device[0] != DeviceType.Virtual:
-            device_move_to_physical(device)
 
     update_resolvconf(dns_server)
 
@@ -2615,12 +2624,10 @@ def menu_select_one(selection, default):
 
 def move_command(args):
     become_root()
+    physical_namespace_set_up()
 
-    if not network_namespace_exists(NAMESPACE_PHYSICAL):
-        run_or_fail(["ip", "netns", "add", NAMESPACE_PHYSICAL])
-        run_or_fail(["ip", "-n", NAMESPACE_PHYSICAL, "link", "set", "lo", "up"])
-        run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "sysctl", 'net.ipv4.ping_group_range=0 2147483647'])
-
+    # NOTE: If the physical namespace would not have existed, then all physical devices, including the specified device, would have already moved to it.
+    #       Otherwise it moves the specified device to the physical namespace.
     for device in get_network_devices():
         if device[0] != DeviceType.Virtual and device[1] == args.INTERFACE[0]:
             device_move_to_physical(device)
