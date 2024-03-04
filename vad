@@ -1300,20 +1300,6 @@ def delete_command(args):
 
     config = config_load(args.config)
 
-    if not args.all and args.INDEX is None:
-        log_warn('Specify a INDEX or use `--all`')
-        raise Abort()
-    elif args.all:
-        peers = config['peers'][:]
-    else:
-        index = int(args.INDEX[0])
-        if index < len(config['peers']):
-            peer = config['peers'][index]
-            peers = [peer]
-        else:
-            log_warn('Peer with index %d does not exists!' % index)
-            return
-
     account_number = user_request_account_number(args.passname, config)
 
     access_token = None
@@ -1324,10 +1310,40 @@ def delete_command(args):
         mullvad.login()
         config['mullvad'] = mullvad.access_token.to_dict()
 
+        peers = []
+        public_keys = []
+        if not args.all and args.INDEX_PUBLIC_KEY is None:
+            log_warn('Specify a INDEX_PUBLIC_KEY or use `--all`')
+            return
+        elif args.all:
+            for peer in config['peers']:
+                public_key = get_public_key(peer['private_key'])
+                public_keys.append(public_key)
+                peers.append(peers)
+        elif len(args.INDEX_PUBLIC_KEY) == 44:
+            peer = mullvad.peer_by_public_key(args.INDEX_PUBLIC_KEY)
+            if peer is None:
+                log_warn('Peer with public key %s does not exists!' % args.INDEX_PUBLIC_KEY)
+                return
+            public_keys.append(args.INDEX_PUBLIC_KEY)
+        elif len(args.INDEX_PUBLIC_KEY) == 1 and args.INDEX_PUBLIC_KEY[0].isdigit():
+            index = int(args.INDEX_PUBLIC_KEY[0])
+            if index < len(config['peers']):
+                peer = config['peers'][index]
+                public_key = get_public_key(peer['private_key'])
+                public_keys.append(public_key)
+                peers.append(peers)
+            else:
+                log_warn('Peer with index %d does not exists!' % index)
+                return
+        else:
+            log_warn('INDEX_PUBLIC_KEY is neither a base64 encoded 256 bit public key nor a index (0-9)!')
+            return
+
         for peer in peers:
-            public_key = get_public_key(peer['private_key'])
-            mullvad.peer_remove(public_key)
             config['peers'].remove(peer)
+        for public_key in public_keys:
+            mullvad.peer_remove(public_key)
             log_info("Deleted peer %s!" % (public_key))
 
         return config_save(args.config, config)
@@ -3023,7 +3039,7 @@ def vad():
     delete = subparsers.add_parser('delete', help='Delete mapped peer(s) from this computer and your account.', **subparser_args)
     delete.add_argument('--all', action='store_true', help='Delete all mapped peers.')
     delete.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
-    delete.add_argument('INDEX', nargs='?', metavar='INDEX', choices=['0','1','2','3','4','5','6','7','8','9'], help='Delete specified mapped peer from this computer and your account (find index with `vad info`). BEWARE index of other peers change after one delete.')
+    delete.add_argument('INDEX_PUBLIC_KEY', nargs='?', metavar='INDEX_PUBLIC_KEY', help='Delete specified mapped peer from this computer and your account. You can do that with the index (`vad info`) or the public key. CAUTION: The index of the other peers changes after deletion. You can use the public key to delete non mapped peers.')
     delete.set_defaults(func=delete_command)
 
     info = subparsers.add_parser('info', help='View account information and highlight peers added to this computer.', **subparser_args)
