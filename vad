@@ -107,10 +107,17 @@ class PrettyTablePretty(PrettyTable):
         self.junction_char = '┼'
 
 
-class DeviceType(Enum):
+class DeviceKind(Enum):
     Ethernet = 1
     Wifi = 2
     Virtual = 3
+
+
+@dataclass
+class Device:
+    kind: DeviceKind
+    name: str
+    phy: str
 
 
 @dataclass
@@ -900,23 +907,21 @@ def run_in_namespace_or_fail(namespace: str, args: list[str], **kwargs):
     return run_or_fail(args, in_namespace=namespace, **kwargs)
 
 
-def device_move_to_physical(device):
-    type, dev, phy = device
+def device_move_to_physical(device: Device):
+    log_verbose("Move device '%s' into %s namespace:" % (device.name, NAMESPACE_PHYSICAL))
 
-    log_verbose("Move device '%s' into %s namespace:" % (dev, NAMESPACE_PHYSICAL))
+    run_or_fail(["ip", "link", "set", device.name, "down"])
+    run_or_fail(["resolvconf", "-f", "-d", '%s.*' % device.name])
 
-    run_or_fail(["ip", "link", "set", dev, "down"])
-    run_or_fail(["resolvconf", "-f", "-d", '%s.*' % dev])
-
-    if type == DeviceType.Ethernet:
-        run_or_fail(["ip", "link", "set", dev, "netns", NAMESPACE_PHYSICAL])
-    elif type == DeviceType.Wifi:
-        run_or_fail(["iw", "phy", phy, "set", "netns", "name", NAMESPACE_PHYSICAL])
-        run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "wpa_supplicant", "-B", "-c", WPA_SUPPLICANT_CONF, "-i", dev])
+    if device.kind == DeviceKind.Ethernet:
+        run_or_fail(["ip", "link", "set", device.name, "netns", NAMESPACE_PHYSICAL])
+    elif device.kind == DeviceKind.Wifi:
+        run_or_fail(["iw", "phy", device.phy, "set", "netns", "name", NAMESPACE_PHYSICAL])
+        run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "wpa_supplicant", "-B", "-c", WPA_SUPPLICANT_CONF, "-i", device.name])
     else:
         assert False
 
-    run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "dhcpcd", "-b", dev])
+    run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "dhcpcd", "-b", device.name])
 
 
 def wireguard_init(namespace, device_name, namespace_link_to, private_key, listen_port=51820):
@@ -1571,10 +1576,9 @@ def network_manager_set_secret(uuid, config):
 
 def workaround_fetch_current_wifi_configuration():
     for device in get_network_devices():
-        if device[0] == DeviceType.Wifi:
+        if device.kind == DeviceKind.Wifi:
             log_verbose("fetch current wifi configuration:")
-            device_name = device[1]
-            log_verbose("- gather configuration for device: '%s'" % device_name)
+            log_verbose("- gather configuration for device: '%s'" % device.name)
             try:
                 bus = dbus.SystemBus()
                 proxy = bus.get_object('fi.w1.wpa_supplicant1', '/fi/w1/wpa_supplicant1')
@@ -1762,7 +1766,7 @@ def physical_namespace_set_up():
     run(["touch", "/etc/netns/physical/resolv.conf"])
 
     for device in get_network_devices():
-        if device[0] != DeviceType.Virtual:
+        if device.kind != DeviceKind.Virtual:
             device_move_to_physical(device)
 
     return False
@@ -1932,13 +1936,12 @@ def remove_network_namespace(namespace):
 
     if namespace == NAMESPACE_PHYSICAL:
         with NetworkNamespace(NAMESPACE_PHYSICAL):
-            devices = get_network_devices()
-            for type, name, phy in devices:
-                run(['ip', 'link', 'set', name, 'down'])
-                if type == DeviceType.Wifi:
-                    run(['iw', 'phy', phy, 'set', 'netns', NAMESPACE_ROOT])
-                elif type == DeviceType.Ethernet:
-                    run(['ip', 'link', 'set', name, 'netns', NAMESPACE_ROOT])
+            for device in get_network_devices():
+                run(['ip', 'link', 'set', device.name, 'down'])
+                if type == DeviceKind.Wifi:
+                    run(['iw', 'phy', device.phy, 'set', 'netns', NAMESPACE_ROOT])
+                elif type == DeviceKind.Ethernet:
+                    run(['ip', 'link', 'set', device.name, 'netns', NAMESPACE_ROOT])
 
     run(['ip', 'netns', 'del', namespace])
 
@@ -2640,13 +2643,25 @@ def menu_select_one(selection, default):
 
 def move_command(args):
     become_root()
-    physical_namespace_set_up()
 
-    # NOTE: If the physical namespace would not have existed, then all physical devices, including the specified device, would have already moved to it.
-    #       Otherwise it moves the specified device to the physical namespace.
+    if not network_namespace_exists(NAMESPACE_PHYSICAL):
+        log_warn('Namespace %s does not exists, can not move device!' % NAMESPACE_PHYSICAL)
+        raise Abort()
+
+    moved_to = False
     for device in get_network_devices():
-        if device[0] != DeviceType.Virtual and device[1] == args.INTERFACE[0]:
+        if device.kind != DeviceKind.Virtual and device.name == args.INTERFACE[0]:
             device_move_to_physical(device)
+            moved_to = True
+
+    exists_in_physical = False
+    with NetworkNamespace(NAMESPACE_PHYSICAL):
+        for device in get_network_devices():
+            if device.kind != DeviceKind.Virtual and device.name == args.INTERFACE[0]:
+                exists_in_physical = True
+
+    if not moved_to and not exists_in_physical:
+        log_warn("Device '%s' does not exists!" % args.INTERFACE[0])
 
 
 def rotate_command(args, up_command_defaults):
@@ -2758,13 +2773,13 @@ def get_network_devices():
     for dev in os.listdir(dir):
         path_dest = os.readlink(os.path.join(dir, dev))
         if 'virtual' in path_dest:
-            devices.append((DeviceType.Virtual, dev, None))
+            devices.append(Device(DeviceKind.Virtual, dev, ''))
         elif 'devices' in path_dest:
             path = os.path.join(dir, path_dest, "phy80211")
             if os.path.exists(path):
-                devices.append((DeviceType.Wifi, dev, os.path.basename(os.readlink(path))))
+                devices.append(Device(DeviceKind.Wifi, dev, os.path.basename(os.readlink(path))))
             else:
-                devices.append((DeviceType.Ethernet, dev, None))
+                devices.append(Device(DeviceKind.Ethernet, dev, ''))
     return devices
 
 
@@ -3111,7 +3126,7 @@ def vad():
     uninstall = subparsers.add_parser('uninstall', aliases=['un'], help='Uninstalles all services.')
     uninstall.set_defaults(func=uninstall_command)
 
-    move = subparsers.add_parser('move', aliases=['mv'], help='Move device into physical namespace and if it does not exist create it.')
+    move = subparsers.add_parser('move', aliases=['mv'], help='Move a physical device into the physical namespace if it exists.')
     move.add_argument('INTERFACE', nargs=1, help='Interface name that will be moved.')
     move.set_defaults(func=move_command)
 
