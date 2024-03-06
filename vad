@@ -67,7 +67,7 @@ LOCK_FILE = f'{RUN_DIR}/lock'
 LOCK_FD = None
 WIREGUARD_DIR = f'{PREFIX}/wireguard'
 WIREGUARD_CONFIG = f'{WIREGUARD_DIR}/{NAME}-%s-%s.conf'
-NAMESPACE_HOP = f'{NAME}%d'
+NAMESPACE_HOP = f'{NAME}-%s-%d'
 DEVICE_NAME_HOP = f'{NAME}%d'
 DESCRIPTION = f'{PREFIX}/wireguard/{NAME}.description'
 CONFIGURATION = f'{PREFIX}/{NAME}/config.yaml'
@@ -984,7 +984,7 @@ def device_move_to_physical(device: Device):
     run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "dhcpcd", "-b", device.name])
 
 
-def wireguard_init(namespace, device_name, namespace_link_to, private_key, listen_port=51820):
+def wireguard_init(namespace: str, device_name: str, namespace_link_to: str, private_key: str, listen_port=51820):
     log_verbose(f"Init wireguard device '%s' in namespace %s and move to namespace %s" % (
         device_name,
         namespace_link_to,
@@ -1956,11 +1956,11 @@ def up_command(args, is_default):
     config = config_save(args.config, config)
 
     namespaces = []
-    namespaces.append(NAMESPACE_PHYSICAL)
+    namespaces.append(args.namespace_physical)
     for idx in range(1, len(hops)):
-        namespaces.insert(1, NAMESPACE_HOP % idx)
-        create_network_namespace(NAMESPACE_HOP % idx)
-    namespaces.append(NAMESPACE_ROOT)
+        namespaces.insert(1, NAMESPACE_HOP % (args.namespace_root, idx))
+        create_network_namespace(NAMESPACE_HOP % (args.namespace_root, idx))
+    namespaces.append(args.namespace_root)
 
     mtu = 1420
     for idx in range(len(hops)):
@@ -2024,6 +2024,8 @@ def remove_device(namespace, device_name):
 
 
 def remove_network_namespace(namespace):
+    if namespace == NAMESPACE_ROOT:
+        return
     log_verbose("Remove network namespace %s" % namespace)
     process = run(['ip', 'netns', 'pids', namespace], failure_ok=True)
     if process.returncode == 0:
@@ -2059,36 +2061,28 @@ def down_command(args):
 
     config = config_load(args.config)
 
-    if config and (not args.partial):
+    if config and not args.partial:
         config_execute_commands(config, 'pre_down')
 
     remove_file_if_exists(DESCRIPTION)
-    remove_file_if_exists(WIREGUARD_CONFIG % (NAMESPACE_ROOT, DEVICE_NAME_HOP % 0))
+    for wireguard_config in glob.glob(os.path.join(WIREGUARD_DIR, f'{NAME}-*.conf')):
+        remove_file_if_exists(wireguard_config)
 
     namespaces = [NAMESPACE_ROOT]
-    for idx in range(1, 10):
-        remove_file_if_exists(WIREGUARD_CONFIG % (NAMESPACE_HOP % idx, DEVICE_NAME_HOP % idx))
-        if network_namespace_exists(NAMESPACE_HOP % idx):
-            namespaces.append(NAMESPACE_HOP % idx)
-    namespaces.append(NAMESPACE_PHYSICAL)
+    namespaces.extend([os.path.basename(f) for f in glob.glob('/var/run/netns/{NAME}-*')])
+    if not args.partial:
+        if network_namespace_exists(NAMESPACE_PHYSICAL):
+            namespaces.append(NAMESPACE_PHYSICAL)
 
-    for idx in reversed(range(len(namespaces))):
-        namespace = namespaces[idx]
-        if network_namespace_exists(namespace):
-            device_name = namespaces[idx-1]
-            if device_name == NAMESPACE_ROOT:
-                device_name = 'vad0'
+    for namespace in namespaces:
+        with NetworkNamespace(namespace):
+            devices = get_network_devices()
+        for device in devices:
+            if device.name.startswith(f'{NAME}'):
+                remove_device(namespace, device.name)
+        remove_network_namespace(namespace)
 
-            remove_device(namespaces[idx-1], device_name)
-
-            if args.partial and namespaces[idx] == NAMESPACE_PHYSICAL:
-                continue
-
-            remove_network_namespace(
-                namespace=namespaces[idx]
-            )
-
-    if (config and not args.partial):
+    if config and not args.partial:
         config_execute_commands(config, 'post_down')
 
     log_verbose("Reset hop configuration")
@@ -3177,6 +3171,8 @@ def vad():
     up.add_argument('-u', '--uniform-by-country', action='store_true', help='Randomly select a country and then randomly select a hop.')
     up.add_argument('-o', '--owned-entry', action='store_true', help='Use a owned server by Mullvad for your entry hop.')
     up.add_argument('-6', '--only-use-ipv6', action='store_true', help='Only use IPv6 addresses.')
+    up.add_argument('-r', '--namespace-root', help='EXPERIMENTAL: You can specific which namespace will have access to the tunnel, if this option is not present, it will be the root namespace, which is called "1" under Linux.', default=NAMESPACE_ROOT)
+    up.add_argument('-p', '--namespace-physical', help='EXPERIMENTAL: You can specific the namespace where you start building your hops. Usually it is the physical namespace but if you want to extend an existing tunnel you can do so.', default=NAMESPACE_PHYSICAL)
     up.set_defaults(func=up_command)
 
     down = subparsers.add_parser('down', aliases=['d'], help='Tear down the vpn configuration and restore the previous state.')
