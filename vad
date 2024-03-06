@@ -1388,14 +1388,6 @@ def get_city_ports(city_ports):
     return ports
 
 
-    id: str
-    name: str
-    pubkey: str
-    hijack_dns: bool
-    created: datetime
-    ipv4_address: str
-    ipv6_address: str
-    ports: list
 def print_peer_table(peers: List[MullvadPeer], mapped_peers, show_ipv6, show_peer_id):
     add_peer = lambda current, peer: table.add_row(
         [current, peer.created] +
