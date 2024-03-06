@@ -971,7 +971,7 @@ def wireguard_device_setup(namespace: str, device_name: str, ipv4: str, ipv6: st
     run_in_namespace_or_fail(namespace, ["ip", "link", "set", device_name, "up"])
     run_in_namespace_or_fail(namespace, ["ip", "link", "set", device_name, "mtu", str(mtu)])
     run_in_namespace_or_fail(namespace, ["ip", "route", "add", "default", "dev", device_name])
-    run_in_namespace_or_fail(namespace, ["ip", "route", "add", "::/0", "dev", device_name])
+    # run_in_namespace_or_fail(namespace, ["ip", "route", "add", "::/0", "dev", device_name])
 
 
 def wireguard_add_peer(namespace:str, device_name:str, public_key:str, endpoint:str=None, allowed_ips:str='0.0.0.0/0,::0/0', persistent_keepalive:int=0):
@@ -1847,7 +1847,7 @@ def up_command(args, is_default):
     if len(args.COUNTRY_CITY_HOSTNAME) == 0:
         args.COUNTRY_CITY_HOSTNAME = ['w']
 
-    servers = load_servers()
+    servers = filter_servers()
 
     if len(args.COUNTRY_CITY_HOSTNAME) == 1 and args.COUNTRY_CITY_HOSTNAME[0] == 'default':
         servers = path_selection_default(servers)
