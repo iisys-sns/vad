@@ -189,37 +189,94 @@ class OnionVpnUrl:
         return OnionVpnUrl(ipv4, port_ip, public_key)
 
 
+MS_RDONLY = 1
+MS_REC = 16384
+MS_SLAVE = 1 << 19
+MNT_DETACH = 2
+CLONE_NEWNET = 0x40000000
+CLONE_NEWNS = 0x00020000
+
+LIBC = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
+LIBC.setns.argtypes = (ctypes.c_int, ctypes.c_int)
+LIBC.unshare.argtypes = (ctypes.c_int,)
+LIBC.mount.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_char_p)
+LIBC.umount2.argtypes = (ctypes.c_char_p, ctypes.c_int)
+
+def setns(fd: int, nstype: int):
+    return LIBC.setns(fd, nstype)
+
+def unshare(flags: int):
+    return LIBC.unshare(flags)
+
+def mount(source: str, target: str, fstype: str, flags: int, data: str):
+    return LIBC.mount(source.encode(), target.encode(), fstype.encode(), flags, data.encode())
+
+def umount2(target: str, flags: int):
+    return LIBC.umount2(target.encode(), flags)
+
 class NetworkNamespace:
+    """
+    This class follows how `ip netns exec ...` switches to network namespaces.
+    <https://git.kernel.org/pub/scm/network/iproute2/iproute2.git/tree/lib/namespace.c?h=v6.7.0#n45>
+    """
     def __init__(self, namespace_name: str):
         self.namespace_name = namespace_name
         self.current_net_ns = None
         self.target_net_ns = None
 
-        try:
-            self.libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
-        except OSError as e:
-            log_fatal("Failed to change netns to '%s' (%s)" % (self.namespace_name, str(e)))
-
     def __enter__(self):
+        if self.namespace_name == NAMESPACE_ROOT:
+            return
+
         log_verbose("Enter network namespace %s" % self.namespace_name)
+
         try:
-            self.current_net_ns = os.open('/proc/self/ns/net', os.O_RDONLY)
-            self.target_net_ns = os.open(f'/var/run/netns/{self.namespace_name}', os.O_RDONLY)
+            self.current_mnt_ns = os.open('/proc/self/ns/mnt', os.O_RDONLY|os.O_CLOEXEC)
+            self.current_net_ns = os.open('/proc/self/ns/net', os.O_RDONLY|os.O_CLOEXEC)
+            self.target_net_ns = os.open(f'/var/run/netns/{self.namespace_name}', os.O_RDONLY|os.O_CLOEXEC)
         except OSError as e:
             log_fatal("Failed to change netns to '%s' (%s)" % (self.namespace_name, str(e)))
 
-        result = self.libc.setns(self.target_net_ns, 0);
-        if result != 0:
-            error_message = os.strerror(ctypes.get_errno())
-            log_fatal("Failed to change netns to '%s' (%s)" % (self.namespace_name, error_message))
-        run_or_fail(['mount', '-t', 'sysfs', 'none', '/sys'])
+        if setns(self.target_net_ns, CLONE_NEWNET) < 0:
+            errmsg = os.strerror(ctypes.get_errno())
+            log_fatal("Failed to change netns to '%s' (%s)" % (self.namespace_name, errmsg))
+
+        os.close(self.target_net_ns)
+
+        if unshare(CLONE_NEWNS) < 0:
+            errmsg = os.strerror(ctypes.get_errno())
+            log_fatal("Unshare mount namespace failed: %s" % (errmsg))
+
+        if mount("none", "/", "none", MS_SLAVE | MS_REC, "") < 0:
+            errmsg = os.strerror(ctypes.get_errno())
+            log_fatal("mount namespace failed: '%s' (%s)" % (self.namespace_name, errmsg))
+
+        mountflags = 0
+        if umount2("/sys", MNT_DETACH) < 0:
+            info = os.statvfs("/sys")
+            if info.f_flag & os.ST_RDONLY:
+                mountflags = MS_RDONLY
+
+        if mount("none", "/sys", "sysfs", mountflags, "") < 0:
+            errmsg = os.strerror(ctypes.get_errno())
+            log_fatal("mount of /sys failed: %s" % (errmsg))
 
     def __exit__(self, *args):
-        run_or_fail(['umount', '/sys'])
-        result = self.libc.setns(self.current_net_ns, 0);
-        if result != 0:
-            error_message = os.strerror(ctypes.get_errno())
-            log_fatal("Failed to change netns back (%s)" % (self.namespace_name, error_message))
+        if self.namespace_name == NAMESPACE_ROOT:
+            return
+
+        if umount2("/sys", 0) < 0:
+            errmsg = os.strerror(ctypes.get_errno())
+            log_fatal("Failed to unmount sysfs: %s" % (errmsg))
+        if setns(self.current_mnt_ns, 0) < 0:
+            errmsg = os.strerror(ctypes.get_errno())
+            log_fatal("Failed to change netns back: %s" % (errmsg))
+        if setns(self.current_net_ns, 0) < 0:
+            errmsg = os.strerror(ctypes.get_errno())
+            log_fatal("Failed to change netns back: %s" % (errmsg))
+        os.close(self.current_mnt_ns)
+        os.close(self.current_net_ns)
+
         log_verbose("Leave network namespace %s" % self.namespace_name)
 
 
