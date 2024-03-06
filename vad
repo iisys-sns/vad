@@ -1750,13 +1750,13 @@ def create_hop_table(hops, without_multihop, title):
     return table
 
 
-def physical_namespace_set_up():
+def physical_namespace_set_up(auto_configure_wifi=False):
     physical_already_existed = network_namespace_exists(NAMESPACE_PHYSICAL)
 
     if physical_already_existed:
         return True
 
-    if args.auto_configure_wifi:
+    if auto_configure_wifi:
         wifi_config = workaround_fetch_current_wifi_configuration()
         if wifi_config is not None:
             write_wpa_supplicant_config(wifi_config)
@@ -1842,7 +1842,7 @@ def up_command(args, is_default):
         log_verbose("Was already active, do a partial tear down.")
         config = down_command(Namespace(config=args.config, partial=True))
 
-    physical_already_existed = physical_namespace_set_up()
+    physical_already_existed = physical_namespace_set_up(args.auto_configure_wifi)
 
     if not physical_already_existed:
         config_execute_commands(config, 'pre_up')
