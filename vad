@@ -137,7 +137,7 @@ class Multihop:
         assert 'multihop_port' in self.exit
         assert self.entry['vpn'] == 'mullvad'
         return int(self.exit['multihop_port'])
-    def provider(self):
+    def vpn(self):
         return self.entry['vpn']
 
 
@@ -153,7 +153,7 @@ class Hop:
         return self.server['ipv6_addr_in']
     def port(self):
         return 51820
-    def provider(self):
+    def vpn(self):
         return self.server['vpn']
 
 
@@ -1661,6 +1661,46 @@ def path_selection(path: list[str], owned_entry: bool, uniform_by_country: bool,
     return selected_path
 
 
+def path_selection_default(nodes: list = None):
+    # (1) Select a entry node
+    #     (a) Select a trust worthy VPN provider uniform at random
+    #     (b) Select a node from this provider uniform at random
+    #     (c) Exclude provider from path selection
+    # (2) Select a middle node
+    #     (a) Select a VPN provider uniform at random
+    #     (b) Select a node from this provider uniform at random
+    #     (c) Exclude provider from path selection
+    # (3) Select a exit node
+    #     (a) Select a VPN provider uniform at random
+    #     (b) Select a node from this provider uniform at random
+    #     (c) Infer and/or measure AS’s from client to entry
+    #     (d) Infer and/or measure AS’s from exit to destination
+    #     (e) Make sure both AS sets do not intersect, if they do, go back to the beginning
+
+    nodes = nodes[:]
+
+    # (1) Select a entry node
+    # WARN: We only have one provider so we will skip (a) and (c), instead we will exclude the node.
+    entry_node_idx = random.randint(0, len(nodes)-1)
+    entry_node = nodes[entry_node_idx]
+    del nodes[entry_node_idx]
+
+    # (2) Select a middle node
+    # WARN: We only have one provider so we will skip (a) and (c), instead we will exclude the node.
+    middle_node_idx = random.randint(0, len(nodes)-1)
+    middle_node = nodes[middle_node_idx]
+    del nodes[middle_node_idx]
+
+    # (3) Select a exit node
+    # WARN: We only have one provider so we will skip (a).
+    # WARN: For (c) and (d) we do not use full ASN path interference and use the provider attribute as a proxy.
+    nodes = list(filter(lambda node: node['provider'] != entry_node['provider'], nodes))
+    exit_node_idx = random.randint(0, len(nodes)-1)
+    exit_node = nodes[exit_node_idx]
+
+    return [entry_node, middle_node, exit_node]
+
+
 def get_peer_from_group(group_by_provider, server):
     provider = server['vpn']
     if len(group_by_provider[provider]) == 0:
@@ -1668,11 +1708,11 @@ def get_peer_from_group(group_by_provider, server):
     return group_by_provider[provider].pop(0)
 
 
-def path_configure_hops(config, servers, without_multihop):
+def path_configure_hops(peers, servers, without_multihop):
     hops = []
 
     group_by_provider = defaultdict(list)
-    for peer in config['peers']:
+    for peer in peers:
         provider = peer['provider']
         group_by_provider[provider].append(peer)
 
@@ -1714,6 +1754,7 @@ def create_hop_table(hops, without_multihop, title):
         'IP',
         'Port',
         'VPN',
+        'Provider',
     ], hrules=hrules)
     table.title = title
     table.align['#'] = 'r'
@@ -1722,6 +1763,7 @@ def create_hop_table(hops, without_multihop, title):
     table.align['Hostname'] = 'l'
     table.align['IP'] = 'r'
     table.align['VPN'] = 'l'
+    table.align['Provider'] = 'l'
 
     idx = 0
     for hop in hops:
@@ -1730,21 +1772,23 @@ def create_hop_table(hops, without_multihop, title):
             country  = '%s\n%s' % (hop.entry['country_name'] , hop.exit['country_name'])
             city     = '%s\n%s' % (hop.entry['city_name']    , hop.exit['city_name'])
             hostname = '%s\n%s' % (hop.entry['hostname']     , hop.exit['hostname'])
+            provider = '%s\n%s' % (hop.entry['provider']     , hop.exit['provider'])
             ip       = '%s\n%s' % (hop.entry['ipv4_addr_in'] , hop.exit['ipv4_addr_in'])
             port     = '%d'     % (hop.port())
-            provider = '%s'     % (hop.provider())
+            vpn      = '%s'     % (hop.vpn())
 
-            table.add_row([index, country, city, hostname, ip, port, provider])
+            table.add_row([index, country, city, hostname, ip, port, vpn, provider])
             idx += 2
         else:
             index    = '%d' % (idx)
             country  = '%s' % (hop.server['country_name'])
             city     = '%s' % (hop.server['city_name'])
             hostname = '%s' % (hop.server['hostname'])
+            provider = '%s' % (hop.server['provider'])
             ip       = '%s' % (hop.server['ipv4_addr_in'])
             port     = '%d' % (hop.port())
-            provider = '%s' % (hop.provider())
-            table.add_row([index, country, city, hostname, ip, port, provider])
+            vpn      = '%s' % (hop.vpn())
+            table.add_row([index, country, city, hostname, ip, port, vpn, provider])
             idx += 1
 
     return table
@@ -1791,19 +1835,20 @@ def up_command(args, is_default):
     if args.update_server_list:
         update_command(None)
 
-    if len(config['peers']) == 0:
+    peers = config.get('peers', [])
+    if len(peers) == 0:
         log_fatal('No peers configured (use `vad init` to create a peer)!')
 
-    if len(args.COUNTRY_CITY_HOSTNAME) > 10:
-        log_fatal('Only 10 hops are supported, you specified %d (%s)!' % (len(args.COUNTRY_CITY_HOSTNAME), args.COUNTRY_CITY_HOSTNAME))
-
     hops = len(args.COUNTRY_CITY_HOSTNAME)
+    if len(args.COUNTRY_CITY_HOSTNAME) == 1 and args.COUNTRY_CITY_HOSTNAME[0] == 'default':
+        hops = 3
+        args.without_multihop = True
     if not args.without_multihop:
-        needed = math.ceil(hops / 2) - len(config['peers'])
+        needed = math.ceil(hops / 2) - len(peers)
         if needed > 0:
             log_fatal('You do not have enough peers to build a %d hop tunnel. With multihop you need at least %d more peer(s) (use `vad init --add-peer`)' % (hops, needed))
     else:
-        needed = hops - len(config['peers'])
+        needed = hops - len(peers)
         if needed > 0:
             log_fatal('You do not have enough peers to build a %d hop tunnel. Without multihop you need at least %d more peer(s) (use `vad init --add-peer`)' % (hops, needed))
 
@@ -1812,22 +1857,24 @@ def up_command(args, is_default):
 
     servers = load_servers()
 
-    servers = path_selection(
-        args.COUNTRY_CITY_HOSTNAME,
-        owned_entry=args.owned_entry,
-        uniform_by_country=args.uniform_by_country,
-        servers=servers
-    )
+    if len(args.COUNTRY_CITY_HOSTNAME) == 1 and args.COUNTRY_CITY_HOSTNAME[0] == 'default':
+        servers = path_selection_default(servers)
+    else:
+        servers = path_selection(
+            args.COUNTRY_CITY_HOSTNAME,
+            owned_entry=args.owned_entry,
+            uniform_by_country=args.uniform_by_country,
+            servers=servers
+        )
+        if None in servers:
+            log_fatal('Filter criteria "%s" does not return any server!' %  args.COUNTRY_CITY_HOSTNAME[servers.index(None)])
 
-    if None in servers:
-        log_fatal('Filter criteria "%s" does not return any server!' %  args.COUNTRY_CITY_HOSTNAME[servers.index(None)])
+        if len(servers) != len(args.COUNTRY_CITY_HOSTNAME):
+            log_fatal("Could not chose unique servers for all hops! Please try again or use wider filter criteria.")
 
-    if len(servers) != len(args.COUNTRY_CITY_HOSTNAME):
-        log_fatal("Could not chose unique servers for all hops! Please try again or use wider filter criteria.")
+    hops = path_configure_hops(peers, servers, args.without_multihop)
 
-    hops = path_configure_hops(config, servers, args.without_multihop)
-
-    if hops[-1].provider() == 'mullvad':
+    if hops[-1].vpn() == 'mullvad':
         dns_server = get_dns_from_args(args)
     else:
         dns_server = hops[-1].peer['dns']
