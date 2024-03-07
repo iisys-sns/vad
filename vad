@@ -1247,6 +1247,8 @@ def config_rebuild_up_command(config, parser_up):
     cmdline = ['vad', 'up']
 
     order = [
+        'namespace_target',
+        'namespace_source',
         'update_server_list',
         'dns',
         'without_multihop'
@@ -1276,6 +1278,9 @@ def config_rebuild_up_command(config, parser_up):
                 cmdline.append(value)
         elif isinstance(defaults[name], bool) and value:
             cmdline.append('--%s' % name.replace('_', '-'))
+        elif isinstance(defaults[name], str):
+            cmdline.append('--%s' % name.replace('_', '-'))
+            cmdline.append(value)
         else:
             assert False, "Can not handle %s attribute!" % name
 
@@ -1844,9 +1849,7 @@ def create_hop_table(hops, without_multihop, title):
 
 
 def physical_namespace_set_up(auto_configure_wifi=False):
-    physical_already_existed = network_namespace_exists(NAMESPACE_PHYSICAL)
-
-    if physical_already_existed:
+    if network_namespace_exists(NAMESPACE_PHYSICAL):
         return True
 
     if auto_configure_wifi:
@@ -1936,12 +1939,16 @@ def up_command(args, is_default):
 
     if is_active():
         log_verbose("Was already active, do a partial tear down.")
-        config = down_command(Namespace(config=args.config, partial=True))
+        config = down_command(Namespace(config=args.config, namespace_target=args.namespace_target, namespace_source=args.namespace_source, partial=True))
 
-    physical_already_existed = physical_namespace_set_up(args.auto_configure_wifi)
+    if args.namespace_source == NAMESPACE_PHYSICAL:
+        physical_already_existed = physical_namespace_set_up(args.auto_configure_wifi)
 
-    if not physical_already_existed:
-        config_execute_commands(config, 'pre_up')
+        if not physical_already_existed:
+            config_execute_commands(config, 'pre_up')
+
+    if args.namespace_target != NAMESPACE_ROOT:
+        create_network_namespace(args.namespace_target)
 
     print(table_hops)
     with open(DESCRIPTION, 'w') as c:
@@ -1956,11 +1963,11 @@ def up_command(args, is_default):
     config = config_save(args.config, config)
 
     namespaces = []
-    namespaces.append(args.namespace_physical)
+    namespaces.append(args.namespace_source)
     for idx in range(1, len(hops)):
-        namespaces.insert(1, NAMESPACE_HOP % (args.namespace_root, idx))
-        create_network_namespace(NAMESPACE_HOP % (args.namespace_root, idx))
-    namespaces.append(args.namespace_root)
+        namespaces.insert(1, NAMESPACE_HOP % (args.namespace_target, idx))
+        create_network_namespace(NAMESPACE_HOP % (args.namespace_target, idx))
+    namespaces.append(args.namespace_target)
 
     mtu = 1420
     for idx in range(len(hops)):
@@ -2000,8 +2007,9 @@ def up_command(args, is_default):
     if not is_default and config and not args.dont_save:
         config = config_save_up_command(config, args)
 
-    if not physical_already_existed:
-        config_execute_commands(config, 'post_up')
+    if args.namespace_source == NAMESPACE_PHYSICAL:
+        if not physical_already_existed:
+            config_execute_commands(config, 'post_up')
 
     run(['systemctl', 'unmask', 'vad.move@.service'])
     log_success("VPN is successfully up!")
@@ -2061,29 +2069,32 @@ def down_command(args):
 
     config = config_load(args.config)
 
-    if config and not args.partial:
-        config_execute_commands(config, 'pre_down')
+    if args.namespace_source == NAMESPACE_PHYSICAL:
+        if config and not args.partial:
+            config_execute_commands(config, 'pre_down')
 
     remove_file_if_exists(DESCRIPTION)
     for wireguard_config in glob.glob(os.path.join(WIREGUARD_DIR, f'{NAME}-*.conf')):
         remove_file_if_exists(wireguard_config)
 
-    namespaces = [NAMESPACE_ROOT]
-    namespaces.extend([os.path.basename(f) for f in glob.glob('/var/run/netns/{NAME}-*')])
+    namespaces = [args.namespace_target]
+    namespaces.extend([os.path.basename(f) for f in glob.glob(f'/var/run/netns/{NAME}-*')])
     if not args.partial:
-        if network_namespace_exists(NAMESPACE_PHYSICAL):
-            namespaces.append(NAMESPACE_PHYSICAL)
+        if network_namespace_exists(args.namespace_source):
+            namespaces.append(args.namespace_source)
 
     for namespace in namespaces:
-        with NetworkNamespace(namespace):
-            devices = get_network_devices()
-        for device in devices:
-            if device.name.startswith(f'{NAME}'):
-                remove_device(namespace, device.name)
-        remove_network_namespace(namespace)
+        if network_namespace_exists(namespace):
+            with NetworkNamespace(namespace):
+                devices = get_network_devices()
+            for device in devices:
+                if device.name.startswith(f'{NAME}'):
+                    remove_device(namespace, device.name)
+            remove_network_namespace(namespace)
 
-    if config and not args.partial:
-        config_execute_commands(config, 'post_down')
+    if args.namespace_source == NAMESPACE_PHYSICAL:
+        if config and not args.partial:
+            config_execute_commands(config, 'post_down')
 
     log_verbose("Reset hop configuration")
     config['hops'] = []
@@ -2103,7 +2114,7 @@ def exec_command(args):
 
     uid = os.getenv('SUDO_UID', os.geteuid())
     gid = os.getenv('SUDO_GID', os.getegid())
-    args = ["ip", "netns", "exec", NAMESPACE_PHYSICAL, "sudo", "-E", "-u", '#%s' % uid, "-g", '#%s' % gid, "--"] + args.CMD
+    args = ["ip", "netns", "exec", args.namespace, "sudo", "-E", "-u", '#%s' % uid, "-g", '#%s' % gid, "--"] + args.CMD
     if VERBOSE:
         print(subprocess.list2cmdline(args))
     os.execvp("ip", args)
@@ -2798,6 +2809,7 @@ def reset_command(args):
 
     config = delete_command(Namespace(config=args.config, all=True, INDEX=None, passname='web/mullvad'))
 
+    # TODO: what to do with source and target namespace?
     down_command(Namespace(config=args.config, partial=False))
 
     if 'account_number' in config:
@@ -3171,16 +3183,19 @@ def vad():
     up.add_argument('-u', '--uniform-by-country', action='store_true', help='Randomly select a country and then randomly select a hop.')
     up.add_argument('-o', '--owned-entry', action='store_true', help='Use a owned server by Mullvad for your entry hop.')
     up.add_argument('-6', '--only-use-ipv6', action='store_true', help='Only use IPv6 addresses.')
-    up.add_argument('-r', '--namespace-root', help='EXPERIMENTAL: You can specific which namespace will have access to the tunnel, if this option is not present, it will be the root namespace, which is called "1" under Linux.', default=NAMESPACE_ROOT)
-    up.add_argument('-p', '--namespace-physical', help='EXPERIMENTAL: You can specific the namespace where you start building your hops. Usually it is the physical namespace but if you want to extend an existing tunnel you can do so.', default=NAMESPACE_PHYSICAL)
+    up.add_argument('-t', '--namespace-target', help='EXPERIMENTAL: You can specific which namespace will have access to the tunnel, if this option is not present, it will be the root namespace, which is called "1" under Linux.', default=NAMESPACE_ROOT)
+    up.add_argument('-b', '--namespace-source', help='EXPERIMENTAL: You can specific the namespace where tunnel has access to (physical) interfaces. Usually it is the physical namespace.', default=NAMESPACE_PHYSICAL)
     up.set_defaults(func=up_command)
 
     down = subparsers.add_parser('down', aliases=['d'], help='Tear down the vpn configuration and restore the previous state.')
     down.add_argument('-p', '--partial', action='store_true', help=f'Do not delete the physical namespace. Your physical network interfaces will remain in this namespace, which leaves you with no network access at all. Useful if you manually configured your physical network namespace.', default=False)
+    down.add_argument('-t', '--namespace-target', help='EXPERIMENTAL: Specific the traget namespace', default=NAMESPACE_ROOT)
+    down.add_argument('-b', '--namespace-source', help='EXPERIMENTAL: Specific the source namespace', default=NAMESPACE_PHYSICAL)
     down.set_defaults(func=down_command)
 
-    exec = subparsers.add_parser('exec', aliases=['e'], help='Execute command in the physical namespace. The command can use the physical network interfaces directly.')
-    exec.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to execute in the physical namespace with or without arguments.')
+    exec = subparsers.add_parser('exec', aliases=['e'], help='Execute command in the physical namespace. The command can use the physical network interfaces directly.', **subparser_args)
+    exec.add_argument('-n', '--namespace', nargs='?', help=f'Specify the namespace you want to execute the command in', default=NAMESPACE_PHYSICAL)
+    exec.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to execute in the specified namespace with or without arguments.')
     exec.set_defaults(func=exec_command)
 
     show = subparsers.add_parser('show', aliases=['s'], help='Show vpn status information, return 0 if active otherwise 1.', **subparser_args)
@@ -3268,6 +3283,7 @@ def vad():
         # TODO: Should this only apply to the first `vad up`, and not to partial ups's?
         if args.func == up_command:
             log_warn("A command failed during `vad up`, to leave the network in a working state we will undo all changes with `vad down`.")
+            # TODO: what to do with source and target namespace?
             down_command(Namespace(config=args.config, partial=False))
         sys.exit(e.returncode)
     except Abort:
