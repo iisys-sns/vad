@@ -1204,7 +1204,7 @@ def config_load(filename):
 
 def config_save(filename, config):
     assert isinstance(config, dict)
-    os.makedirs(os.path.dirname(filename))
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, 'w') as c:
         yaml.dump(config, c)
     os.chmod(filename, 0o600)
