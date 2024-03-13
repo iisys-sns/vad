@@ -1061,10 +1061,10 @@ def is_active():
     any_exists = os.path.exists(configuration_filename) or os.path.exists(DESCRIPTION)
     all_exists = os.path.exists(configuration_filename) and os.path.exists(DESCRIPTION)
 
-    if not any_exists == all_exists:
-        log_warn('Warning: If the VPN is active or inactive two things should exist or not exist:')
-        log_warn('- %s (%s) and' % (DESCRIPTION, os.path.exists(DESCRIPTION)))
-        log_warn('- %s (%s)' % (configuration_filename, os.path.exists(configuration_filename)))
+    # if not any_exists == all_exists:
+    #     log_warn('Warning: If the VPN is active or inactive two things should exist or not exist:')
+    #     log_warn('- %s (%s) and' % (DESCRIPTION, os.path.exists(DESCRIPTION)))
+    #     log_warn('- %s (%s)' % (configuration_filename, os.path.exists(configuration_filename)))
 
     return (
         os.path.exists(configuration_filename) or
@@ -1192,7 +1192,7 @@ def user_request_account_number(passname, config):
 
 def config_load(filename):
     if not os.path.exists(filename):
-        return False
+        return dict()
 
     with open(filename) as c:
         config = yaml.safe_load(c)
