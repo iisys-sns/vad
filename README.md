@@ -223,6 +223,7 @@ $ # vad down
   but will not manage them (keyword: strictly unmanged), for whatever reason.
 * [ ] Use type hinting in conjunction with `mypy`.
   Instead of making python more statically typed it is a better idea to reimplement it in a statically typed language.
+* [ ] Replace `wg` with `python-iproute2` netlink interface
 
 ## Ideas
 
