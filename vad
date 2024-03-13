@@ -643,7 +643,7 @@ class Mullvad:
                 relays.append(MullvadRelay.from_dict(relay))
         return relays
 
-    def authenticate(self, account_number: str, access_token: Optional[MullvadToken] = None):
+    def authenticate(self, account_number: str, access_token: Optional[MullvadToken] = None) -> MullvadAuth:
         return MullvadAuth(account_number, access_token)
 
 
@@ -1393,7 +1393,7 @@ def delete_command(args):
             for peer in config['peers']:
                 public_key = get_public_key(peer['private_key'])
                 public_keys.append(public_key)
-                peers.append(peers)
+                peers.append(peer)
         elif len(args.INDEX_PUBLIC_KEY) == 44:
             peer = mullvad.peer_by_public_key(args.INDEX_PUBLIC_KEY)
             if peer is None:
@@ -1406,7 +1406,7 @@ def delete_command(args):
                 peer = config['peers'][index]
                 public_key = get_public_key(peer['private_key'])
                 public_keys.append(public_key)
-                peers.append(peers)
+                peers.append(peer)
             else:
                 log_warn('Peer with index %d does not exists!' % index)
                 return
@@ -1952,7 +1952,8 @@ def up_command(args, is_default):
             config_execute_commands(config, 'pre_up')
 
     if args.namespace_target != NAMESPACE_ROOT:
-        create_network_namespace(args.namespace_target)
+        if not network_namespace_exists(args.namespace_target):
+            create_network_namespace(args.namespace_target)
 
     print(table_hops)
     with open(DESCRIPTION, 'w') as c:
@@ -2006,7 +2007,8 @@ def up_command(args, is_default):
 
         mtu -= 80
 
-    update_resolvconf(dns_server)
+    if args.namespace_target == NAMESPACE_ROOT:
+        update_resolvconf(dns_server)
 
     if not is_default and config and not args.dont_save:
         config = config_save_up_command(config, args)
@@ -2094,6 +2096,8 @@ def down_command(args):
             for device in devices:
                 if device.name.startswith(f'{NAME}'):
                     remove_device(namespace, device.name)
+            if args.partial and namespace == args.namespace_target:
+                continue
             remove_network_namespace(namespace)
 
     if args.namespace_source == NAMESPACE_PHYSICAL:
