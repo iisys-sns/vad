@@ -1310,7 +1310,7 @@ def init_command(args):
         mullvad.login()
         config['mullvad'] = mullvad.access_token.to_dict()
         config = config_save(args.config, config)
-        config = add_command(Namespace(passname=args.passname, count=1))
+        config = add_command(Namespace(config=args.config, passname=args.passname, count=1))
 
         if args.dont_save_account_number:
             if 'account_number' in config:
