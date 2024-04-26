@@ -3,9 +3,9 @@
 An alternative experimental command line interface (CLI) for Mullvad that is based on network namespaces, supports up to ten hops and does not need a daemon.
 It aims to be very user friendly.
 It is based on [this](https://www.wireguard.com/netns#sample-script) script.
-It also supports features that make Onion Services possible, these are **HIGHLY EXPERIMENTAL**!
+It also supports features that make Onion Services possible, even without port-forwarding, but these are **HIGHLY EXPERIMENTAL!**
 
-With network namespaces all programs from users, except programs that run with root rights, are forced to use the VPN interface to connect to the Internet, without complex iptable rules.
+With network namespaces all programs from users, except programs that run with root privileges, are forced to use the VPN interface to connect to the Internet, without complex iptable rules.
 An so-called "kill switch" is already integrated.
 After an `vad up`, if the VPN does not work anymore, no traffic will go out of the normal interfaces.
 The hop configuration can also be rebuild without traffic leaks.
@@ -203,7 +203,7 @@ $ vad -c /etc/vad/work.yaml up --dns atmpg eu  # Connect to a random server in t
 $ vad -c /etc/vad/work.yaml up                 # Connect to another random server in the European Union with the same nameserver.
 ```
 
-Onion Service (**HIGHLY EXPERIMENTAL**!):
+Onion Service (**HIGHLY EXPERIMENTAL!**):
 
 ```sh
 # Proxy:
