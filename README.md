@@ -3,8 +3,7 @@
 An alternative experimental command line interface (CLI) for Mullvad that is based on network namespaces, supports up to ten hops and does not need a daemon.
 It aims to be very user friendly.
 It is based on [this](https://www.wireguard.com/netns#sample-script) script.
-It is unclear how much privacy you can gain if use more than one hop.
-But you will, for sure, lose performance.
+It also supports features that make Onion Services possible, these are **HIGHLY EXPERIMENTAL**!
 
 With network namespaces all programs from users, except programs that run with root rights, are forced to use the VPN interface to connect to the Internet, without complex iptable rules.
 An so-called "kill switch" is already integrated.
@@ -23,7 +22,7 @@ The physical devices will stay inaccessible until an `vad down`.
 1. Uses `wpa_supplicant` to configure wlan devices (if you use e.g. NetworkManager you need to duplicate the configuration); and;
 1. You don't want to use Socks Proxies for Multihop.
 
-## Dependencies
+## Dependencies (TODO)
 
 1. `sudo`,
 1. `kill`, `killall`
@@ -42,7 +41,7 @@ The physical devices will stay inaccessible until an `vad down`.
 1. `resolvconf`,
 1. `pass` (optionally).
 
-## Install Dependencies
+## Install Dependencies (TODO)
 
 Arch Linux based:
 
@@ -120,8 +119,15 @@ $ vad
 Build a 3 hop tunnel:
 
 ```sh
-$ vad init -a       # We need one more peer for the first tunnel
+$ vad add           #  We need one more peer for the first tunnel
 $ vad up de pl se   # 3 hops: Tunnel(de) -> Multihop(pl, se)
+$ vad
+```
+
+Build a 3 hop circuit with the default path selection algorithm:
+
+```sh
+$ vad up default   # The first and last hop has not the same provider
 $ vad
 ```
 
@@ -195,6 +201,23 @@ Copy your current configuration `/etc/vad/config.yaml` to `/etc/vad/work.yaml`.
 ```sh
 $ vad -c /etc/vad/work.yaml up --dns atmpg eu  # Connect to a random server in the European Union. See `vad up --help` for `--dns` flags.
 $ vad -c /etc/vad/work.yaml up                 # Connect to another random server in the European Union with the same nameserver.
+```
+
+Onion Service (**HIGHLY EXPERIMENTAL**!):
+
+```sh
+# Proxy:
+$ vad proxy                             # Must be reachable from the Internet on UDP port 6666.
+
+# Service:
+$ vad start python -m http.server 8000  # Starts a webserver in the current directory.
+                                        # The service will be started in the network namespace `service`.
+                                        # Outputs an URL where the service is reachable, e.g. aaah6aaaahcn5vsceb5ntdbls2u3xl2dtqb4uywj2dbgfcjels5guvmovfffyodu.onion.vpn
+                                        # The URL contains the address and port of the proxy, as well as the service port (8000).
+
+# Client:
+$ vad connect <URL>                     # Uses the URL from the service.
+                                        # Afterwards the client can access the service at http://[fc00::1]:8000
 ```
 
 Reset:
