@@ -1645,7 +1645,7 @@ def workaround_fetch_current_wifi_configuration():
                 bus = dbus.SystemBus()
                 proxy = bus.get_object('fi.w1.wpa_supplicant1', '/fi/w1/wpa_supplicant1')
                 wpas = dbus.Interface(proxy, 'fi.w1.wpa_supplicant1')
-                interface_path = wpas.GetInterface(device_name)
+                interface_path = wpas.GetInterface(device.name)
                 log_verbose('- interface path: %s' % interface_path)
                 proxy = bus.get_object('fi.w1.wpa_supplicant1', interface_path)
                 current_network_path = proxy.Get('fi.w1.wpa_supplicant1.Interface', 'CurrentNetwork', dbus_interface=dbus.PROPERTIES_IFACE)
@@ -1661,7 +1661,7 @@ def workaround_fetch_current_wifi_configuration():
 
             try:
                 log_verbose("retrieve secrets from NetworkManager:")
-                uuid = network_manager_get_active_connection(device_name)
+                uuid = network_manager_get_active_connection(device.name)
                 network_manager_set_secret(uuid, config)
             except Exception as e:
                 log_bad("Can not retrieve wifi information from wpa supplicant over DBus (%s)" % str(e))
@@ -2087,11 +2087,13 @@ def down_command(args):
     namespaces = [args.namespace_target]
     namespaces.extend([os.path.basename(f) for f in glob.glob(f'/var/run/netns/{NAME}-*')])
     if not args.partial:
-        if network_namespace_exists(args.namespace_source):
+        if args.namespace_source == NAMESPACE_ROOT:
+            namespaces.append(args.namespace_source)
+        elif network_namespace_exists(args.namespace_source):
             namespaces.append(args.namespace_source)
 
     for namespace in namespaces:
-        if network_namespace_exists(namespace):
+        if network_namespace_exists(namespace) or namespace == NAMESPACE_ROOT:
             with NetworkNamespace(namespace):
                 devices = get_network_devices()
             for device in devices:
