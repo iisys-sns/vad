@@ -1105,7 +1105,7 @@ def load_servers():
             provider_servers = json.load(f)
             for provider_server in provider_servers:
                 provider_server['vpn'] = provider
-            servers.extend(provider_servers)
+                servers.append(provider_server)
 
     return servers
 
@@ -1736,24 +1736,26 @@ def path_selection_default(nodes: list = None):
     #     (d) Infer and/or measure AS’s from exit to destination
     #     (e) Make sure both AS sets do not intersect, if they do, go back to the beginning
 
-    nodes = nodes[:]
+    nodes_by_vpn = defaultdict(list)
+    for node in nodes:
+        nodes_by_vpn[node['vpn']].append(node)
+    nodes = nodes_by_vpn
+    providers = list(nodes_by_vpn.keys())
 
     # (1) Select a entry node
-    # WARN: We only have one provider so we will skip (a) and (c), instead we will exclude the node.
-    entry_node_idx = random.randint(0, len(nodes)-1)
-    entry_node = nodes[entry_node_idx]
-    del nodes[entry_node_idx]
+    entry_provider = random.choice(providers)
+    entry_node = random.choice(nodes[entry_provider])
+    providers.remove(entry_provider)
 
     # (2) Select a middle node
-    # WARN: We only have one provider so we will skip (a) and (c), instead we will exclude the node.
-    middle_node_idx = random.randint(0, len(nodes)-1)
-    middle_node = nodes[middle_node_idx]
-    del nodes[middle_node_idx]
+    middle_provider = random.choice(providers)
+    middle_node = random.choice(nodes[middle_provider])
+    providers.remove(middle_provider)
 
     # (3) Select a exit node
-    # WARN: We only have one provider so we will skip (a).
     # WARN: For (c) and (d) we do not use full ASN path interference and use the provider attribute as a proxy.
-    nodes = list(filter(lambda node: node['provider'] != entry_node['provider'], nodes))
+    exit_provider = random.choice(providers)
+    nodes = list(filter(lambda node: node['provider'] != entry_node['provider'], nodes[exit_provider]))
     exit_node_idx = random.randint(0, len(nodes)-1)
     exit_node = nodes[exit_node_idx]
 
