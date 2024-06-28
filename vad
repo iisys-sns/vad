@@ -1558,7 +1558,7 @@ def show_command(args):
                 sys.stdout.flush()
             subprocess.run(["wg"])
             for idx in range(1, 10):
-                namespace = NAME + str(idx)
+                namespace = NAMESPACE_HOP % ('1', idx)
                 if network_namespace_exists(namespace):
                     print()
                     subprocess.run(["ip", "netns", "exec", namespace, "wg"])
@@ -2841,9 +2841,9 @@ def check_unique_city_codes(servers):
     country_cities = set([(server['country_code'], server['city_code']) for server in servers])
     city_counter = Counter([city for country, city in country_cities])
 
-    duplicates = set()
     for city, count in city_counter.items():
         if count > 1:
+            duplicates = set()
             for server in servers:
                 if city == server['city_code']:
                     duplicates.add('%s (%s), %s (%s)' % (server['country_name'], server['country_code'], server['city_name'], server['city_code']))
@@ -2856,9 +2856,9 @@ def check_special_country_codes_not_in_use(servers):
     countries = set([server['country_code'] for server in servers])
     for server in servers:
         if 'eu' == server['country_code']:
-            log_warn("Attention, the special country code 'eu' used by this program is in use by a server. This makes this server unselectable! (%s)", str(server))
+            log_warn("Attention, the special country code 'eu' used by this program is in use by a server. This makes this server unselectable! (%s)" % str(server))
         if 'ec' == server['country_code']:
-            log_warn("Attention, the special country code 'ec' used by this program is in use by a server. This makes this server unselectable! (%s)", str(server))
+            log_warn("Attention, the special country code 'ec' used by this program is in use by a server. This makes this server unselectable! (%s)" % str(server))
 
 
 def update_command(args):
