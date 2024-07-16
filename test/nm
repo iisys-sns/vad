@@ -1,0 +1,51 @@
+#!/bin/bash
+set -ex
+
+ETH="enp0s31f6"
+WLP="wlp0s20f3"
+NS="test"
+
+function cleanup() {
+    systemctl stop NetworkManager
+    ip netns exec ${NS} killall -w wpa_supplicant || true
+    ip netns exec ${NS} killall -w dhcpd || true
+
+    systemctl revert NetworkManager || true
+    systemctl revert wpa_supplicant || true
+
+    ip netns exec ${NS} ip link set dev ${ETH} down || true
+    ip netns exec ${NS} ip link set dev ${ETH} netns 1 || true
+
+    ip netns exec ${NS} ip link set dev ${WLP} down || true
+    ip netns exec ${NS} iw phy phy0 set netns 1 || true
+
+    ip netns del ${NS} || true
+    systemctl start NetworkManager || true
+}
+
+trap cleanup EXIT
+
+systemctl stop NetworkManager
+timeout -s KILL 5 killall -w wpa_supplicant || treu
+timeout -s KILL 5 killall -w dhcpd || true
+
+ip netns add ${NS}
+ip netns exec ${NS} ip link set lo up
+ip netns exec ${NS} sysctl net.ipv4.ping_group_range="0 2147483647"
+
+ip link set dev ${ETH} down
+ip link set dev ${ETH} netns ${NS}
+
+ip link set dev ${WLP} down
+iw phy phy0 set netns name ${NS}
+
+mkdir -p /etc/systemd/system/wpa_supplicant.service.d
+printf "[Service]\nNetworkNamespacePath=/var/run/netns/%s" "${NS}" > /etc/systemd/system/wpa_supplicant.service.d/override.conf
+
+mkdir -p /etc/systemd/system/NetworkManager.service.d
+printf "[Service]\nNetworkNamespacePath=/var/run/netns/%s" "${NS}" > /etc/systemd/system/NetworkManager.service.d/override.conf
+
+systemctl daemon-reload
+systemctl start NetworkManager
+
+sleep 1000
