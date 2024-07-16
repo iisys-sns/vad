@@ -8,10 +8,10 @@ It also supports features that make Onion Services possible, even without port-f
 Other VPN providers or self-hosted VPNs are not directly supported, but you can integrate them manually.
 You will need two things for this:
 
-#. A WireGuard server list from the provider, in which each server has at least one IP address and a public key.
+1. A WireGuard server list from the provider, in which each server has at least one IP address and a public key.
    But it's a bit more complicated than that, because at the moment the structure of the server list has to match that of Mullvad.
    But if you have such a list, you can put it under `/etc/vad/<provider>.json`.
-#. You need to generate a key pair and upload the public key to the provider to get access via their (web) interface.
+1. You need to generate a key pair and upload the public key to the provider to get access via their (web) interface.
    You also need to know your default IP address and the provider's DNS server. Then you can add the following
    to the `peers` in `/etc/vad/config.yaml`:
 
