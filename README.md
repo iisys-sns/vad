@@ -5,7 +5,7 @@ It aims to be very user friendly.
 It is based on [this](https://www.wireguard.com/netns#sample-script) script.
 It also supports features that make Onion Services possible, even without port-forwarding, but these are **HIGHLY EXPERIMENTAL!**
 
-With network namespaces all programs from users, except programs that run with root privileges, are forced to use the VPN interface to connect to the Internet, without complex iptable rules.
+With network namespaces all programs from users, except programs that run with root privileges, are forced to use the VPN interface to connect to the Internet, without complex `iptable` rules.
 An so-called "kill switch" is already integrated.
 After an `vad up`, if the VPN does not work anymore, no traffic will go out of the normal interfaces.
 The hop configuration can also be rebuild without traffic leaks.
@@ -18,8 +18,7 @@ The physical devices will stay inaccessible until an `vad down`.
 1. You only want to use WireGuard servers (not OpenVPN);
 1. You don't have network interfaces with the names `vad[0-9]`;
 1. You don't have WireGuard configuration files with the names `/etc/wireguard/vad[0-9]`;
-1. You don't have other network namespaces with the name `physical` or `vad[1-9]`;
-1. Uses `wpa_supplicant` to configure wlan devices (if you use e.g. NetworkManager you need to duplicate the configuration); and;
+1. You don't have other network namespaces with the name `physical` or `vad[1-9]`; and;
 1. You don't want to use Socks Proxies for Multihop.
 
 ## Dependencies (TODO)
@@ -61,27 +60,6 @@ There could be problems with other configured WireGuard/VPN interfaces.
 
 ## Features by Example
 
-If you are not connected via an ethernet cable and have only a wlan device add the following configuration file before use. This is a known issue.
-
-```
-/etc/wpa_supplicant/wpa_supplicant.conf
----------------------------------------
-ctrl_interface=/run/wpa_supplicant
-update_config=1
-
-network={
-	ssid="<YOUR SSID>"
-	psk="<YOUR PSK>"
-}
-```
-
-If you do not want do configure it manually and; have NetworkManager; currently connected to an wifi network; and; `wpa_supplicant` is used, you can execute the following command.
-Be aware that this is only a workaround.
-
-```sh
-vad up -i
-```
-
 If you have any problems, use `vad down` it will rollback all changes from `vad up`.
 
 First use:
@@ -90,6 +68,34 @@ First use:
 $ vad init   # Will ask for your account number and saves it
 $ vad up
 ```
+
+If you do not have a configuration file under `/etc/vad/config.yaml`, `vad init` will create a default configuration for you.
+At the moment it assumes that you are using NetworkManager with systemd, in the future it may automatically find a suitable configuration for you.
+The configuration will look like this:
+
+```
+post_down:
+- systemctl revert wpa_supplicant
+- systemctl revert NetworkManager
+- systemctl start NetworkManager
+post_up:
+- mkdir -p /etc/systemd/system/wpa_supplicant.service.d
+- printf '[Service]\nNetworkNamespacePath=/var/run/netns/physical' > /etc/systemd/system/wpa_supplicant.service.d/override.conf
+- mkdir -p /etc/systemd/system/NetworkManager.service.d
+- printf '[Service]\nNetworkNamespacePath=/var/run/netns/physical' > /etc/systemd/system/NetworkManager.service.d/override.conf
+- systemctl daemon-reload
+- systemctl start NetworkManager
+pre_down:
+- systemctl stop NetworkManager
+- systemctl stop wpa_supplicant
+pre_up:
+- systemctl stop NetworkManager
+- systemctl stop wpa_supplicant
+```
+
+During `vad up`, a physical namespace is created and all physical interfaces are moved there.
+NetworkManager is also moved to the physical namespace.
+After `vad up` you can manage your interfaces with NetworkManager as usual.
 
 Show status information:
 
@@ -181,20 +187,6 @@ post_down:
 $ vad up
 ```
 
-Sometimes NetworkManager interferes with the `/etc/resolv.conf` configuration, to disable it on `vad up`:
-
-```sh
-$ vad down
-$ # Add the following to your `/etc/vad/config.yaml`:
-[...]
-pre_up:
-- systemctl stop NetworkManager
-post_down:
-- systemctl start NetworkManager
-[...]
-$ vad up
-```
-
 You want to use other `*_up` and/or `*_down` commands; and a differnt hop configuration for work?
 Copy your current configuration `/etc/vad/config.yaml` to `/etc/vad/work.yaml`.
 
@@ -232,6 +224,7 @@ $ # vad down
 
 ## TODOs
 
+* [ ] Add default configuration during `vad init` if no configuration exists.
 * [ ] Currently the configuration file under `/etc/vad/config.yaml` is not only read but also written to, to store state information.
   From the perspective of the user this is unexpected behaviour and it would be better to split configuration from state.
   The state information could live in `/var/run/vad/state`.
@@ -241,9 +234,6 @@ $ # vad down
 * [ ] Add some documentation comments
 * [ ] Implement a configuration class and api request class
 * [ ] Test if dependencies are installed while launching
-* [ ] A workaround for doubling wlan configuratoin exists now, but it needs to be revisied in the future.
-  It would be better to move NetworkManager directly into the physical namespace. From testing this is possible and it sees the devices,
-  but will not manage them (keyword: strictly unmanged), for whatever reason.
 * [ ] Use type hinting in conjunction with `mypy`.
   Instead of making python more statically typed it is a better idea to reimplement it in a statically typed language.
 * [ ] Replace `wg` with `python-iproute2` netlink interface

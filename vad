@@ -977,11 +977,8 @@ def device_move_to_physical(device: Device):
         run_or_fail(["ip", "link", "set", device.name, "netns", NAMESPACE_PHYSICAL])
     elif device.kind == DeviceKind.Wifi:
         run_or_fail(["iw", "phy", device.phy, "set", "netns", "name", NAMESPACE_PHYSICAL])
-        run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "wpa_supplicant", "-B", "-c", WPA_SUPPLICANT_CONF, "-i", device.name])
     else:
         assert False
-
-    run_or_fail(["ip", "netns", "exec", NAMESPACE_PHYSICAL, "dhcpcd", "-b", device.name])
 
 
 def wireguard_init(namespace: str, device_name: str, namespace_link_to: str, private_key: str, listen_port=51820):
@@ -1609,89 +1606,6 @@ def print_status_connected():
         return False
 
 
-def network_manager_get_active_connection(device_name):
-    client = NM.Client.new(None)
-    for device in client.get_devices():
-        if device.get_iface() == device_name:
-            connection = device.get_active_connection()
-            if connection is not None:
-                return connection.get_uuid()
-
-
-def network_manager_set_secret(uuid, config):
-    process = run(
-        ["nmcli", "--show-secrets", "con", "show", str(uuid)],
-        failure_ok=True, print_output=False
-    )
-    output = str(process.stdout, 'utf8').strip()
-    for line in output.split('\n'):
-        key, value = line.split(':', 1)
-        key = key.strip()
-        value = value.strip()
-        if 'password' in key and not '-flags' in key and value != '--':
-            config['password'] = '"%s"' % value
-            return
-        elif 'psk' in key and not '-flags' in key and value != '--':
-            config['psk'] = '"%s"' % value
-            return
-
-
-def workaround_fetch_current_wifi_configuration():
-    for device in get_network_devices():
-        if device.kind == DeviceKind.Wifi:
-            log_verbose("fetch current wifi configuration:")
-            log_verbose("- gather configuration for device: '%s'" % device.name)
-            try:
-                bus = dbus.SystemBus()
-                proxy = bus.get_object('fi.w1.wpa_supplicant1', '/fi/w1/wpa_supplicant1')
-                wpas = dbus.Interface(proxy, 'fi.w1.wpa_supplicant1')
-                interface_path = wpas.GetInterface(device.name)
-                log_verbose('- interface path: %s' % interface_path)
-                proxy = bus.get_object('fi.w1.wpa_supplicant1', interface_path)
-                current_network_path = proxy.Get('fi.w1.wpa_supplicant1.Interface', 'CurrentNetwork', dbus_interface=dbus.PROPERTIES_IFACE)
-                log_verbose('- current network path: %s' % current_network_path)
-                proxy = bus.get_object('fi.w1.wpa_supplicant1', current_network_path)
-                network = proxy.Get('fi.w1.wpa_supplicant1.Network', 'Properties', dbus_interface=dbus.PROPERTIES_IFACE)
-                config = {}
-                for key, value in network.items():
-                    config[str(key)] = str(value)
-            except Exception as e:
-                log_bad("Can not retrieve wifi information from wpa supplicant over DBus (%s)" % str(e))
-                return None
-
-            try:
-                log_verbose("retrieve secrets from NetworkManager:")
-                uuid = network_manager_get_active_connection(device.name)
-                network_manager_set_secret(uuid, config)
-            except Exception as e:
-                log_bad("Can not retrieve wifi information from wpa supplicant over DBus (%s)" % str(e))
-                return None
-
-            return config
-
-
-def write_wpa_supplicant_config(wifi_config):
-    config = [
-        "ctrl_interface=/run/wpa_supplicant",
-        "update_config=1",
-        "",
-        "network={"
-    ]
-    for key, value in wifi_config.items():
-        key = key.strip()
-        value = value.strip()
-        if len(value) == 0:
-            log_verbose("key has zero length!")
-            continue
-        config.append('    %s=%s' % (key, value))
-    config.append("}")
-    try:
-        with open(WPA_SUPPLICANT_CONF, 'w') as f:
-            f.write('\n'.join(config))
-    except IOError as e:
-        log_bad('Could not write configuration: %s (%s)' % (WPA_SUPPLICANT_CONF, str(e)))
-
-
 def path_selection(path: list[str], owned_entry: bool, uniform_by_country: bool, servers: list = None):
     selected_path = [
         server_random_choice(
@@ -1855,18 +1769,12 @@ def create_hop_table(hops, without_multihop, title):
     return table
 
 
-def physical_namespace_set_up(auto_configure_wifi=False):
+def physical_namespace_set_up():
     if network_namespace_exists(NAMESPACE_PHYSICAL):
         return True
 
-    if auto_configure_wifi:
-        wifi_config = workaround_fetch_current_wifi_configuration()
-        if wifi_config is not None:
-            write_wpa_supplicant_config(wifi_config)
-
     create_network_namespace(NAMESPACE_PHYSICAL)
 
-    run(["timeout", "-s", "KILL", "5", "killall", "-w", "wpa_supplicant", "dhcpcd"], failure_ok=True)
     run(["mkdir", "-p", "/etc/netns/physical"])
     run(["rm", "-f", "/etc/netns/physical/resolv.conf"])
     run(["touch", "/etc/netns/physical/resolv.conf"])
@@ -1949,7 +1857,7 @@ def up_command(args, is_default):
         config = down_command(Namespace(config=args.config, namespace_target=args.namespace_target, namespace_source=args.namespace_source, partial=True))
 
     if args.namespace_source == NAMESPACE_PHYSICAL:
-        physical_already_existed = physical_namespace_set_up(args.auto_configure_wifi)
+        physical_already_existed = physical_namespace_set_up()
 
         if not physical_already_existed:
             config_execute_commands(config, 'pre_up')
@@ -3188,7 +3096,6 @@ def vad():
 
     up = subparsers.add_parser('up', aliases=['u'], help=f'Set up a vpn tunnel: move all physical network devices into the physical network namespace, configure one or more Mullvad server and setup a wireguard device in the root namespace. All programs from non root users are forced to use the wireguard device in the root namespace.')
     up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the server\'s hostname. The sequence determines the data flow. More hops require more devices (see `vad init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the European Union then use "eu". If you only want to use hops from countries on the European continent then use "ec". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vad up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
-    up.add_argument('-i', '--auto-configure-wifi', action='store_true', help='This is a workaround to automaically configure the wifi interface. It only works if you have NetworkManager, currently connected to an wifi network and `wpa_supplicant` is used. It will retrive the configuration from `wpa_supplicant` for the current network and fetch the PSK from NetworkManager (somehow `wpa_supplicant` does not give us this information?). This is at least a better for usability then configuring it manually.')
     up.add_argument('-s', '--dont-save', action='store_true', help='Do not save the last call with arguments to the configuration file.')
     up.add_argument('-a', '--update-server-list', action='store_true', help='Update server list.')
     up.add_argument('-n', '--dry-run', action='store_true', help='Show only chosen hop(s) and nameserver.')
