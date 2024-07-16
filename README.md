@@ -5,6 +5,24 @@ It aims to be very user friendly.
 It is based on [this](https://www.wireguard.com/netns#sample-script) script.
 It also supports features that make Onion Services possible, even without port-forwarding, but these are **HIGHLY EXPERIMENTAL!**
 
+Other VPN providers or self-hosted VPNs are not directly supported, but you can integrate them manually.
+You will need two things for this:
+
+#. A WireGuard server list from the provider, in which each server has at least one IP address and a public key.
+   But it's a bit more complicated than that, because at the moment the structure of the server list has to match that of Mullvad.
+   But if you have such a list, you can put it under `/etc/vad/<provider>.json`.
+#. You need to generate a key pair and upload the public key to the provider to get access via their (web) interface.
+   You also need to know your default IP address and the provider's DNS server. Then you can add the following
+   to the `peers` in `/etc/vad/config.yaml`:
+
+    ```
+    - dns: <dns address>
+      ipv4: <ipv4 address or null>
+      ipv6: <ipv6 address or null>
+      private_key: <key>
+      provider: <provider>
+    ```
+
 With network namespaces all programs from users, except programs that run with root privileges, are forced to use the VPN interface to connect to the Internet, without complex `iptable` rules.
 An so-called "kill switch" is already integrated.
 After an `vad up`, if the VPN does not work anymore, no traffic will go out of the normal interfaces.
@@ -177,7 +195,7 @@ $ # Add the following to your `/etc/vad/config.yaml`:
 [...]
 post_up:
 - mkdir -p /etc/systemd/system/sshd.service.d
-- echo -n "[Service]\nNetworkNamespacePath=/var/run/netns/physical" > /etc/systemd/system/sshd.service.d/override.conf
+- printf "[Service]\nNetworkNamespacePath=/var/run/netns/physical" > /etc/systemd/system/sshd.service.d/override.conf
 - systemctl daemon-reload
 - systemctl restart sshd
 post_down:
