@@ -15,7 +15,7 @@ You will need two things for this:
    You also need to know your default IP address and the provider's DNS server. Then you can add the following
    to the `peers` in `/etc/vad/config.yaml`:
 
-    ```
+    ```yaml
     - dns: <dns address>
       ipv4: <ipv4 address or null>
       ipv6: <ipv6 address or null>
@@ -91,7 +91,7 @@ If you do not have a configuration file under `/etc/vad/config.yaml`, `vad init`
 At the moment it assumes that you are using NetworkManager with systemd, in the future it may automatically find a suitable configuration for you.
 The configuration will look like this:
 
-```
+```yaml
 post_down:
 - systemctl revert wpa_supplicant
 - systemctl revert NetworkManager
