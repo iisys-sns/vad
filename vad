@@ -42,6 +42,7 @@ from collections import deque
 from datetime import datetime
 from enum import Enum
 from prettytable import PrettyTable, ALL, NONE, FRAME
+from tempfile import NamedTemporaryFile
 
 import inspect
 from io import StringIO
@@ -66,7 +67,6 @@ RUN_DIR = '/var/run/vad'
 LOCK_FILE = f'{RUN_DIR}/lock'
 LOCK_FD = None
 WIREGUARD_DIR = f'{PREFIX}/wireguard'
-WIREGUARD_CONFIG = f'{WIREGUARD_DIR}/{NAME}-%s-%s.conf'
 NAMESPACE_HOP = f'{NAME}-%s-%d'
 DEVICE_NAME_HOP = f'{NAME}%d'
 DESCRIPTION = f'{PREFIX}/wireguard/{NAME}.description'
@@ -991,22 +991,10 @@ def wireguard_init(namespace: str, device_name: str, namespace_link_to: str, pri
     run_in_namespace_or_fail(namespace_link_to, ["ip", "link", "add", device_name, "type", "wireguard"])
     run_in_namespace_or_fail(namespace_link_to, ["ip", "link", "set", device_name, "netns", namespace])
 
-    configuration_filename = WIREGUARD_CONFIG % (namespace, device_name)
-
-    if os.path.exists(configuration_filename):
-        log_fatal("Configuration %s already exists!" % configuration_filename)
-
-    with open(configuration_filename, 'w') as c:
-        wireguard_config = f"""
-            [Interface]
-            PrivateKey = {private_key}
-            ListenPort = {listen_port}
-            """
-        wireguard_config = wireguard_config.strip()
-        wireguard_config = '\n'.join([line.strip() for line in wireguard_config.split('\n')])
-        c.write(wireguard_config)
-
-    run_in_namespace_or_fail(namespace, ["wg", "setconf", device_name, configuration_filename])
+    with NamedTemporaryFile('w+') as key:
+        key.write('%s\n' % private_key)
+        key.flush()
+        run_in_namespace_or_fail(namespace, ["wg", "set", device_name, "private-key", key.name, "listen-port", str(listen_port)])
 
 
 def wireguard_device_setup(namespace: str, device_name: str, ipv4: str, ipv6: str, mtu: int = 1420):
@@ -1053,20 +1041,7 @@ def update_resolvconf(dns):
 
 # TODO: Revist this function
 def is_active():
-    configuration_filename = WIREGUARD_CONFIG % (NAMESPACE_ROOT, DEVICE_NAME_HOP % 0)
-
-    any_exists = os.path.exists(configuration_filename) or os.path.exists(DESCRIPTION)
-    all_exists = os.path.exists(configuration_filename) and os.path.exists(DESCRIPTION)
-
-    # if not any_exists == all_exists:
-    #     log_warn('Warning: If the VPN is active or inactive two things should exist or not exist:')
-    #     log_warn('- %s (%s) and' % (DESCRIPTION, os.path.exists(DESCRIPTION)))
-    #     log_warn('- %s (%s)' % (configuration_filename, os.path.exists(configuration_filename)))
-
-    return (
-        os.path.exists(configuration_filename) or
-        os.path.exists(DESCRIPTION)
-    )
+    return os.path.exists(DESCRIPTION)
 
 
 def get_dns_server_from_flags(flags):
@@ -1991,8 +1966,6 @@ def down_command(args):
             config_execute_commands(config, 'pre_down')
 
     remove_file_if_exists(DESCRIPTION)
-    for wireguard_config in glob.glob(os.path.join(WIREGUARD_DIR, f'{NAME}-*.conf')):
-        remove_file_if_exists(wireguard_config)
 
     namespaces = [args.namespace_target]
     namespaces.extend([os.path.basename(f) for f in glob.glob(f'/var/run/netns/{NAME}-*')])
@@ -2444,7 +2417,6 @@ def start_command(args, up_command_defaults):
         if service_process is not None:
             service_process.terminate()
             service_process.wait()
-        remove_file_if_exists(WIREGUARD_CONFIG % ('service', 'service0'))
         remove_device('service', 'service0')
         remove_network_namespace('service')
 
@@ -2539,7 +2511,6 @@ def connect_command(args):
             run(['ping', '-c', '5', '-6', 'fc00::1'])
         run_in_namespace_or_fail('client', ['chromium', f'http://[fc00::1]:{service_port}'], as_user=True)
     finally:
-        remove_file_if_exists(WIREGUARD_CONFIG % ('client', 'client0'))
         remove_device('client', 'client0')
         remove_network_namespace('client')
 

@@ -34,9 +34,8 @@ The physical devices will stay inaccessible until an `vad down`.
 1. Only works under Linux (requires network namespaces);
 1. You have a Mullvad account;
 1. You only want to use WireGuard servers (not OpenVPN);
-1. You don't have network interfaces with the names `vad[0-9]`;
-1. You don't have WireGuard configuration files with the names `/etc/wireguard/vad[0-9]`;
-1. You don't have other network namespaces with the name `physical` or `vad[1-9]`; and;
+1. You don't have a network interface with the names `vad0` in your root namespace;
+1. You don't have other network namespaces with the name `physical` or `vad*`; and;
 1. You don't want to use Socks Proxies for Multihop.
 
 ## Dependencies (TODO)
