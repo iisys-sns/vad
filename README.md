@@ -46,8 +46,6 @@ The physical devices will stay inaccessible until an `vad down`.
 1. `wg`,
 1. `ip`,
 1. `iw` (for wifi),
-1. `wpa_supplicant` (for wifi),
-1. `dhcpcd`,
 1. `sysctl`,
 1. `python-yaml`,
 1. `python-dbus`,

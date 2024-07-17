@@ -30,9 +30,6 @@ import threading
 import unittest
 import yaml
 
-gi.require_version("NM", "1.0")
-
-from gi.repository import NM
 from datetime import datetime
 from termcolor import colored
 from argparse import Namespace
@@ -71,7 +68,6 @@ NAMESPACE_HOP = f'{NAME}-%s-%d'
 DEVICE_NAME_HOP = f'{NAME}%d'
 DESCRIPTION = f'{PREFIX}/wireguard/{NAME}.description'
 CONFIGURATION = f'{PREFIX}/{NAME}/config.yaml'
-WPA_SUPPLICANT_CONF = f'{PREFIX}/wpa_supplicant/{NAME}.conf'
 PROVIDER_DIR = f'{PREFIX}/{NAME}'
 MULLVAD_SERVERS = f'{PROVIDER_DIR}/mullvad.json'
 NAMESPACE_ROOT = '1'
@@ -1751,8 +1747,7 @@ def physical_namespace_set_up():
     create_network_namespace(NAMESPACE_PHYSICAL)
 
     run(["mkdir", "-p", "/etc/netns/physical"])
-    run(["rm", "-f", "/etc/netns/physical/resolv.conf"])
-    run(["touch", "/etc/netns/physical/resolv.conf"])
+    run(["cp", "/etc/resolv.conf", "/etc/netns/physical/resolv.conf"])
 
     for device in get_network_devices():
         if device.kind != DeviceKind.Virtual:
@@ -2764,7 +2759,7 @@ def update_command(args):
         log_warn('Can not download servers from %s, because of %s' % (url_servers, str(e)))
 
 
-def get_network_devices():
+def get_network_devices() -> List[Device]:
     dir = '/sys/class/net'
     devices = []
     for dev in os.listdir(dir):
@@ -2790,8 +2785,6 @@ class TestDependencies(unittest.TestCase):
             "wg",
             "ip",
             "iw",
-            "wpa_supplicant",
-            "dhcpcd",
             "sysctl",
             "resolvconf",
             # pass
@@ -2982,7 +2975,7 @@ def test_command(args):
         images.append(test_build_image('archlinux', not args.docker_skip_build,
             """
             FROM {base_image}
-            RUN pacman -Syu --noconfirm python-requests python-dbus python-yaml python-prettytable python-numpy sudo iw wpa_supplicant dhcpcd wireguard-tools
+            RUN pacman -Syu --noconfirm python-requests python-dbus python-yaml python-prettytable python-numpy sudo iw wireguard-tools
             """
         ))
 
