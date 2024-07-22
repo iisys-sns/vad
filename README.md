@@ -8,8 +8,8 @@ It also supports features that make Onion Services possible, even without port-f
 Other VPN providers or self-hosted VPNs are not directly supported, but you can integrate them manually.
 You will need two things for this:
 
-1. A WireGuard server list from the provider, in which each server has at least one IP address and a public key.
-   But it's a bit more complicated than that, because at the moment the structure of the server list has to match that of Mullvad.
+1. A WireGuard relay/server list from the provider, in which each relay has at least one IP address and a public key.
+   But it's a bit more complicated than that, because at the moment the structure of the relay list has to match that of Mullvad.
    But if you have such a list, you can put it under `/etc/vad/<provider>.json`.
 1. You need to generate a key pair and upload the public key to the provider to get access via their (web) interface.
    You also need to know your default IP address and the provider's DNS server. Then you can add the following
@@ -33,9 +33,9 @@ The physical devices will stay inaccessible until an `vad down`.
 
 1. Only works under Linux (requires network namespaces);
 1. You have a Mullvad account;
-1. You only want to use WireGuard servers (not OpenVPN);
-1. You don't have a network interface with the names `vad0` in your root namespace;
-1. You don't have other network namespaces with the name `physical` or `vad*`; and;
+1. You only want to use WireGuard relays (not OpenVPN);
+1. You don't have a network interface with the name `vad0` in your root namespace;
+1. You don't have other network namespaces with the name `physical` or `vad-*`; and;
 1. You don't want to use Socks Proxies for Multihop.
 
 ## Dependencies (TODO)
@@ -122,11 +122,11 @@ $ vad
 The up command can be called multiple times:
 
 ```sh
-$ vad up de    # Build one hop tunnel to a server in Germany
+$ vad up de    # Build one hop tunnel to a relay/server in Germany
 $ vad show
-$ vad up pl    # Update one hop tunnel to a server in Poland
+$ vad up pl    # Update one hop tunnel to a relay/server in Poland
 $ vad
-$ vad up se    # Update one hop tunnel to a server in Sweden
+$ vad up se    # Update one hop tunnel to a relay/server in Sweden
 $ vad
 ```
 
@@ -152,7 +152,7 @@ $ vad up default   # The first and last hop has not the same provider
 $ vad
 ```
 
-Update server list:
+Update relay list:
 
 ```sh
 $ vad update
@@ -206,8 +206,8 @@ You want to use other `*_up` and/or `*_down` commands; and a differnt hop config
 Copy your current configuration `/etc/vad/config.yaml` to `/etc/vad/work.yaml`.
 
 ```sh
-$ vad -c /etc/vad/work.yaml up --dns atmpg eu  # Connect to a random server in the European Union. See `vad up --help` for `--dns` flags.
-$ vad -c /etc/vad/work.yaml up                 # Connect to another random server in the European Union with the same nameserver.
+$ vad -c /etc/vad/work.yaml up --dns atmpg eu  # Connect to a random relay in the European Union. See `vad up --help` for `--dns` flags.
+$ vad -c /etc/vad/work.yaml up                 # Connect to another random relay in the European Union with the same nameserver.
 ```
 
 Onion Service (**HIGHLY EXPERIMENTAL!**):
@@ -247,15 +247,15 @@ $ # vad down
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until down.
 * [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
-* [ ] Implement a configuration class and api request class
 * [ ] Test if dependencies are installed while launching
 * [ ] Use type hinting in conjunction with `mypy`.
-  Instead of making python more statically typed it is a better idea to reimplement it in a statically typed language.
+      Instead of making python more statically typed it is a better idea to reimplement it in a statically typed language.
 * [ ] Replace `wg` with `python-iproute2` netlink interface
 
 ## Ideas
 
 * Use anonymous namespaces (except for physical); only optionally name the namespaces to allow easy access with `ip netns exec <namespace>`.
+  Is this even possible? When in between namespaces do not have any process running and only have an active WireGuard interface?
 * Add `--pick-different-as` and remove `--uniform-by-country`.
   This flag will pick a different country and provider pair for each hop after user provided filter criteria.
   It will hopefully prevent picking the same (virtual/overlay) autonomous system (AS) for each hop.
