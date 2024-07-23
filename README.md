@@ -239,17 +239,11 @@ $ # vad down
 
 ## TODOs
 
-* [ ] Add default configuration during `vad init` if no configuration exists.
-* [ ] Currently the configuration file under `/etc/vad/config.yaml` is not only read but also written to, to store state information.
-  From the perspective of the user this is unexpected behaviour and it would be better to split configuration from state.
-  The state information could live in `/var/run/vad/state`.
 * [ ] Support adding external peers with `vad add`
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until down.
 * [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
 * [ ] Test if dependencies are installed while launching
-* [ ] Use type hinting in conjunction with `mypy`.
-      Instead of making python more statically typed it is a better idea to reimplement it in a statically typed language.
 * [ ] Replace `wg` with `python-iproute2` netlink interface
 
 ## Ideas

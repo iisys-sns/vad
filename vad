@@ -7,24 +7,19 @@ import base64
 import ctypes
 import ctypes.util
 import dataclasses
-import dbus
-import errno
 import fcntl
-import gi
 import glob
 import ipaddress
 import json
 import math
 import os
 import random
-import re
 import requests
 import shutil
 import socket
 import struct
 import subprocess
 import sys
-import textwrap
 import threading
 import unittest
 import yaml
@@ -39,24 +34,20 @@ from collections import Counter
 from collections import deque
 from datetime import datetime
 from enum import Enum
-from prettytable import PrettyTable, ALL, NONE, FRAME
+from prettytable import PrettyTable, ALL, FRAME
 from tempfile import NamedTemporaryFile
 
-import inspect
 from io import StringIO
-from requests import Response
 from contextlib import redirect_stdout
 from functools import partial
 from dataclasses import dataclass
 from dataclasses import is_dataclass
 from dataclasses import field
 from types import UnionType, NoneType
-from typing import Tuple, Callable, TypedDict, TypeVar, Type, Dict, Any, List, Optional, Self, NotRequired, Union, get_type_hints, get_args, get_origin
-from pprint import pprint
+from typing import Tuple, TypeVar, Type, Set, Dict, Any, List, Optional, Union, NoReturn, Deque, get_type_hints, get_args, get_origin
 
-import nacl.signing, nacl.public
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from noise.connection import NoiseConnection, Keypair
 
@@ -126,7 +117,7 @@ class Device:
 @dataclass
 class OnionVpnUrl:
     ipv4: str
-    port_ip: str
+    port_ip: int
     public_key: bytes
 
     def to_url(self) -> str:
@@ -149,7 +140,7 @@ class OnionVpnUrl:
         url_decoded = base64.b32decode(url.upper())
         url_decoded = url_decoded[2:]
         ipv4 = str(ipaddress.IPv4Address(url_decoded[0:4]))
-        port_ip = str(struct.unpack('!H', url_decoded[4:6])[0])
+        port_ip = struct.unpack('!H', url_decoded[4:6])[0]
         public_key = url_decoded[6:]
         assert len(public_key) == 32
         return OnionVpnUrl(ipv4, port_ip, public_key)
@@ -227,7 +218,7 @@ class NetworkNamespace:
             errmsg = os.strerror(ctypes.get_errno())
             log_fatal("mount of /sys failed: %s" % (errmsg))
 
-    def __exit__(self, *args):
+    def __exit__(self, *_):
         if self.namespace_name == NAMESPACE_ROOT:
             return
 
@@ -279,7 +270,7 @@ class NoiseUDPSocket:
         self.address = udp.address
         self.public_key = public_key
 
-    def settimeout(self, timeout):
+    def settimeout(self, timeout: Optional[int]):
         self.udp.settimeout(timeout)
 
     def send(self, data: bytes):
@@ -295,18 +286,22 @@ class NoiseUDPSocket:
 class InterceptRemoteStaticPublicKey:
     def __init__(self, noise: NoiseConnection):
         self.noise:NoiseConnection = noise
-        self.func = self.noise.noise_protocol.handshake_done # pyright: ignore
+        if self.noise.noise_protocol is not None:
+            self.func = self.noise.noise_protocol.handshake_done
         self.public_key = b''
 
     def __enter__(self) -> 'InterceptRemoteStaticPublicKey':
         def handshake_done():
-            self.public_key = self.noise.noise_protocol.handshake_state.rs.public_bytes
+            if self.noise.noise_protocol is not None:
+                self.public_key = self.noise.noise_protocol.handshake_state.rs.public_bytes
             self.func()
-        self.noise.noise_protocol.handshake_done = handshake_done
+        if self.noise.noise_protocol is not None:
+            self.noise.noise_protocol.handshake_done = handshake_done
         return self
 
-    def __exit__(self, *args):
-        self.noise.noise_protocol.handshake_done = self.func
+    def __exit__(self, *_):
+        if self.noise.noise_protocol is not None:
+            self.noise.noise_protocol.handshake_done = self.func
 
 
 def initiator_do_handshake(name, udp: UDPSocket, conn: NoiseConnection) -> NoiseUDPSocket:
@@ -346,10 +341,10 @@ def responder_do_handshake(name, udp: UDPSocket, conn: NoiseConnection) -> Noise
 
 
 class ProxyPeer:
-    def __init__(self, udp: UDPSocket):
+    def __init__(self, udp: UDPSocket|NoiseUDPSocket):
         self.udp = udp
-        self.public_key = None
-        self.handler = None
+        self.public_key = b''
+        self.handler = lambda: None
 
     def handle(self):
         self.handler()
@@ -359,9 +354,9 @@ class Proxy:
     def __init__(self, key: X25519PrivateKey, port: int):
         self.key = key
         self.port = port
-        self.peers = {}
-        self.listener = {}
-        self.listener_peers = deque([], 10000)
+        self.peers: Dict[Tuple[str, int], ProxyPeer] = {}
+        self.listener: Dict[bytes, Tuple[str, int]] = {}
+        self.listener_peers: Deque[ProxyPeer] = deque([], 10000)
 
     def start(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -373,7 +368,7 @@ class Proxy:
             while True:
                 try:
                     print('Proxy: Waiting for messages...')
-                    data, address = sock.recvfrom(0, socket.MSG_PEEK)
+                    _, address = sock.recvfrom(0, socket.MSG_PEEK)
                     if address not in self.peers:
                         print('Proxy: New peer')
                         peer = ProxyPeer(UDPSocket(sock, address))
@@ -388,6 +383,7 @@ class Proxy:
     def state_handshake(self, peer: ProxyPeer):
         noise = NoiseConnection.from_name(b'Noise_IK_25519_ChaChaPoly_BLAKE2s')
         noise.set_keypair_from_private_bytes(Keypair.STATIC, self.key.private_bytes_raw())
+        assert isinstance(peer.udp, UDPSocket)
         peer.udp = responder_do_handshake('Proxy', peer.udp, noise)
         peer.public_key = peer.udp.public_key
         peer.handler = partial(self.state_normal, peer)
@@ -450,6 +446,7 @@ class ParseError(Exception):
     pass
 
 
+@dataclass
 class Base:
     def to_dict(self) -> Dict[str, Any]:
         def serialize(object):
@@ -466,7 +463,7 @@ class Base:
 T = TypeVar("T")
 
 
-def pretty_type(base: Type[T]) -> str:
+def pretty_type(base: type) -> str:
     if base is str:
         return 'str'
     elif base is int:
@@ -491,7 +488,7 @@ def pretty_type(base: Type[T]) -> str:
         return str(base)
 
 
-def parse_and_check_type(context: str, base: Type[T], data: Any) -> Any:
+def parse_and_check_type(context: str, base: type, data: Any) -> Any:
     data_type = type(data)
     if base is data_type:
         return data
@@ -514,8 +511,7 @@ def parse_and_check_type(context: str, base: Type[T], data: Any) -> Any:
             except ParseError as e:
                 errors.append(str(e))
                 continue
-        errors = '\n- '.join(errors)
-        raise ParseError("Possible causes:\n- %s" % (errors))
+        raise ParseError("Possible causes:\n- %s" % ('\n- '.join(errors)))
     elif is_dataclass(base) and data_type is dict:
         for field_name, field_type in get_type_hints(base).items():
             if field_name not in data:
@@ -563,21 +559,22 @@ class Config(Base):
 
 @dataclass
 class Relay(Base):
-    hostname: str
-    country_code: str
-    country_name: str
-    city_code: str
-    city_name: str
-    active: bool
-    owned: bool
-    asn: str
-    ipv4: str
-    ipv6: str
-    gigabit_per_second: int
-    public_key: str
-    multihop_port: int
-    provider: str
+    hostname: str = ''
+    country_code: str = ''
+    country_name: str = ''
+    city_code: str = ''
+    city_name: str = ''
+    active: bool = False
+    owned: bool = False
+    asn: str = ''
+    ipv4: str = ''
+    ipv6: str = ''
+    gigabit_per_second: int = 0
+    public_key: str =  ''
+    multihop_port: int = 0
+    provider: str = ''
 
+EmptyRelay = Relay()
 
 @dataclass
 class Hop(Base):
@@ -672,10 +669,6 @@ class MullvadError(Exception):
     pass
 
 
-class MullvadParseError(Exception):
-    pass
-
-
 @dataclass
 class MullvadAccount(Base):
     id: str
@@ -739,7 +732,7 @@ class Mullvad:
     def __enter__(self):
         return self
 
-    def __exit__(self, exception_type, exception_value, exception_traceback):
+    def __exit__(self, *_):
         return False
 
     def do(self, name: str, request: requests.Request, status_codes: List[int]):
@@ -792,13 +785,14 @@ class MullvadAuth(Mullvad):
         self.login()
         return self
 
-    def __exit__(self, exception_type, exception_value, exception_traceback):
+    def __exit__(self, *_):
         self.logout()
         return False
 
     def do_authenticated(self, name: str, request: requests.Request, status_codes: List[int]):
         self.login()
-        request.headers['Authorization'] = f'Bearer {self.access_token.access_token}'
+        if self.access_token is not None:
+            request.headers['Authorization'] = f'Bearer {self.access_token.access_token}'
         return self.do(name, request, status_codes)
 
     def login(self):
@@ -904,7 +898,7 @@ def punch_hole(name, udp: UDPSocket, number_of_messages=10):
 
     try:
         while True:
-            data, address = udp.sock.recvfrom(2048, socket.MSG_PEEK)
+            data, _ = udp.sock.recvfrom(2048, socket.MSG_PEEK)
             if len(data) == 0:
                 udp.recv(0)
             else:
@@ -929,20 +923,13 @@ def get_socket_proxy_client6(proxy_address, port=0):
     return UDPSocket(sock, proxy_address)
 
 
-def nop_colored(text, *args, **kwargs):
-    return text
-
-
-if not sys.stdout.isatty() or not sys.stderr.isatty():
-    colored = nop_colored
-
-
-already_locked = False
+ALREADY_LOCKED = False
 
 
 def lock():
-    global already_locked
-    if already_locked:
+    global ALREADY_LOCKED
+    global LOCK_FD
+    if ALREADY_LOCKED:
         return
     os.makedirs(RUN_DIR, exist_ok=True)
     fd = open(LOCK_FILE, 'a')
@@ -950,7 +937,7 @@ def lock():
     fd.write('%s\n' % os.getpid())
     fd.flush()
     LOCK_FD = fd
-    already_locked = True
+    ALREADY_LOCKED = True
     atexit.register(unlock)
 
 
@@ -983,10 +970,10 @@ def log_verbose(text, **kwargs):
 
 
 def log_info(text, highlight=False, **kwargs):
-    attrs=[]
     if highlight:
-        attrs=['bold']
-    print(colored(text, 'blue', attrs=attrs), **kwargs)
+        print(colored(text, 'blue', attrs=['bold']), **kwargs)
+    else:
+        print(colored(text, 'blue'), **kwargs)
 
 
 def log(text, **kwargs):
@@ -1005,7 +992,7 @@ def log_warn(text, **kwargs):
     print(colored(text, 'yellow'), **kwargs)
 
 
-def log_fatal(text, **kwargs):
+def log_fatal(text, **kwargs) -> NoReturn:
     log_bad(text, **kwargs)
     raise Abort
 
@@ -1014,7 +1001,7 @@ def log_bad(text, **kwargs):
     print(colored(text, 'red'), **kwargs)
 
 
-def print_command(process, print_output=True, **kwargs):
+def print_command(process, print_output=True):
     command = subprocess.list2cmdline(process.args)
     command = command.replace('\n','\\n')
 
@@ -1035,24 +1022,24 @@ def to_base64(data: bytes) -> str:
     return base64.b64encode(data).decode('utf8')
 
 
-def from_base64(data: str) -> str:
+def from_base64(data: str) -> bytes:
     return base64.b64decode(data)
 
 
 # TODO:: Hardcoded and DNS names are not supported at the moment, you need to replace 'proxy' with you public ip address!
-PROXY_ADDRESS = ('proxy', 50398)
+PROXY_ADDRESS: Tuple[str, int] = ('proxy', 50398)
 PROXY_KEY = X25519PrivateKey.from_private_bytes(from_base64('KEGMxadHKE4F0dtQ/SiYYL5/EnW6xlXna1dTF+pj8n4='))
 SERVICE_KEY = X25519PrivateKey.from_private_bytes(from_base64('+Gnm7XzLwm+ioOaVBca3ZS1UL2bklpaYD/688rnOV24='))
 
 
 
-def ipv4_pack(ip, port):
-    ip = ipaddress.IPv4Address(ip).packed
-    port = struct.pack('!H', port)
-    return ip + port
+def ipv4_pack(ip: str, port: int) -> bytes:
+    ip_packed = ipaddress.IPv4Address(ip).packed
+    port_packed = struct.pack('!H', port)
+    return ip_packed + port_packed
 
 
-def ipv4_unpack(data):
+def ipv4_unpack(data: bytes) -> Tuple[str, int]:
     assert len(data) == 6
     ip = data[0:4]
     port = data[4:6]
@@ -1138,7 +1125,7 @@ def wireguard_init(namespace: str, device_name: str, namespace_link_to: str, pri
         run_in_namespace_or_fail(namespace, ["wg", "set", device_name, "private-key", key.name, "listen-port", str(listen_port)])
 
 
-def wireguard_device_setup(namespace: str, device_name: str, ipv4: str, ipv6: str, mtu: int = 1420):
+def wireguard_device_setup(namespace: str, device_name: str, ipv4: Optional[str], ipv6: Optional[str], mtu: int = 1420):
     log_verbose(f"Setup wireguard device '%s' in namespace %s (ipv4=%s, ipv6=%s, mtu=%s)" % (
         device_name,
         namespace,
@@ -1157,7 +1144,7 @@ def wireguard_device_setup(namespace: str, device_name: str, ipv4: str, ipv6: st
     # run_in_namespace_or_fail(namespace, ["ip", "route", "add", "::/0", "dev", device_name])
 
 
-def wireguard_add_peer(namespace:str, device_name:str, public_key:str, endpoint:str=None, allowed_ips:str='0.0.0.0/0,::0/0', persistent_keepalive:int=0):
+def wireguard_add_peer(namespace:str, device_name:str, public_key:str, endpoint:Optional[str]=None, allowed_ips:str='0.0.0.0/0,::0/0', persistent_keepalive:int=0):
     log_verbose("Add wireguard peer to %s in namespace %s" % (device_name, namespace))
     command = ['wg', 'set', device_name, 'peer', public_key]
     if endpoint is not None:
@@ -1170,11 +1157,12 @@ def wireguard_add_peer(namespace:str, device_name:str, public_key:str, endpoint:
 def update_resolvconf(dns):
     log_verbose('Update `resolvconf` with nameserver %s:' % dns)
     with subprocess.Popen(['resolvconf', '-a', '%s.vad' % DEVICE_NAME_HOP % 0], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
-        process.stdin.write(bytes('nameserver %s\n' % dns, 'utf8'))
-        process.stdin.close()
-        stdout = process.stdout.read()
-        process.stdout.close()
-        process.stdout = stdout
+        if process.stdin is not None:
+            process.stdin.write(bytes('nameserver %s\n' % dns, 'utf8'))
+            process.stdin.close()
+        if process.stdout is not None:
+            process.stdout.read()
+            process.stdout.close()
     if VERBOSE:
         print_command(process)
     run(['resolvconf', '-u'])
@@ -1223,43 +1211,41 @@ def load_relays(providers: Optional[List[str]] = None) -> List[Relay]:
     return relays
 
 
-def filter_relays(relays: List[Relay], active: Optional[bool] = None, owned: Optional[bool] = None, country_city_hostname: Optional[str] = None):
+def filter_relays(relays: List[Relay], active: Optional[bool] = None, owned: Optional[bool] = None, country_city_hostname: Optional[str] = None) -> List[Relay]:
     if owned is not None:
-        relays = filter(lambda relay: relay.owned == owned, relays)
+        relays = list(filter(lambda relay: relay.owned == owned, relays))
 
     if active is not None:
-        relays = filter(lambda relay: relay.active == active, relays)
+        relays = list(filter(lambda relay: relay.active == active, relays))
 
     if country_city_hostname is not None and not country_city_hostname == 'w':
         if country_city_hostname == 'eu':
-            relays = filter(lambda relay: relay.country_code in EUROPE_UNION, relays)
+            relays = list(filter(lambda relay: relay.country_code in EUROPE_UNION, relays))
         elif country_city_hostname == 'ec':
-            relays = filter(lambda relay: relay.country_code in EUROPE_CONTINENT, relays)
+            relays = list(filter(lambda relay: relay.country_code in EUROPE_CONTINENT, relays))
         elif len(country_city_hostname) == 2:
-            relays = filter(lambda relay: relay.country_code == country_city_hostname, relays)
+            relays = list(filter(lambda relay: relay.country_code == country_city_hostname, relays))
         elif len(country_city_hostname) == 3:
-            relays = filter(lambda relay: relay.city_code == country_city_hostname, relays)
+            relays = list(filter(lambda relay: relay.city_code == country_city_hostname, relays))
         elif len(country_city_hostname) >= 4:
-            relays = filter(lambda relay: country_city_hostname in relay.hostname, relays)
+            relays = list(filter(lambda relay: country_city_hostname in relay.hostname, relays))
         else:
             relays = []
 
-    relays = list(relays)
     return relays
 
 
-def relay_random_choice(relays: List[Relay], uniform_by_country: bool = False) -> Optional[Relay]:
+def relay_random_choice(relays: List[Relay], uniform_by_country: bool = False) -> Relay:
     if uniform_by_country:
-        countries = set()
+        countries: Set[str] = set()
         for relay in relays:
             countries.add(relay.country_code)
-        countries = list(countries)
         if len(countries) == 0:
-            return None
-        country = random.choice(countries)
-        relays = filter_relays(country_city_hostname=country, relays=relays)
+            return EmptyRelay
+        c: str = random.choice(list(countries))
+        relays = filter_relays(country_city_hostname=c, relays=relays)
     if len(relays) == 0:
-        return None
+        return EmptyRelay
     return random.choice(relays)
 
 
@@ -1309,23 +1295,28 @@ def state_load(config_filename: str = CONFIGURATION, state_filename: str = STATE
     if state is not None:
         return state
 
+    config = None
+
     try:
         config = Config.load(config_filename)
     except ParseError as e:
         log_fatal("Parsing '%s' failed: %s" % (config_filename, str(e)))
 
     try:
-        state = State.load(state_filename)
+        new_state = State.load(state_filename)
+
+        if config is not None:
+            new_state = new_state.merge_config(config)
+
+        if auto_save:
+            atexit.register(lambda: new_state.save())
+
+        state = new_state
+
+        return new_state
     except ParseError as e:
         traceback.print_exception(e)
         log_fatal("Parsing '%s' failed: %s" % (state_filename, str(e)))
-
-    state = state.merge_config(config)
-
-    if auto_save:
-        atexit.register(lambda: state.save())
-
-    return state
 
 
 def init_command(args):
@@ -1343,9 +1334,9 @@ def init_command(args):
             ],
             post_up=[
                 "mkdir -p /etc/systemd/system/wpa_supplicant.service.d",
-                "printf '[Service]\nNetworkNamespacePath=/var/run/netns/physical' > /etc/systemd/system/wpa_supplicant.service.d/override.conf",
+                "printf '[Service]\\nNetworkNamespacePath=/var/run/netns/physical' > /etc/systemd/system/wpa_supplicant.service.d/override.conf",
                 "mkdir -p /etc/systemd/system/NetworkManager.service.d",
-                "printf '[Service]\nNetworkNamespacePath=/var/run/netns/physical' > /etc/systemd/system/NetworkManager.service.d/override.conf",
+                "printf '[Service]\\nNetworkNamespacePath=/var/run/netns/physical' > /etc/systemd/system/NetworkManager.service.d/override.conf",
                 "systemctl daemon-reload",
                 "systemctl start NetworkManager",
             ],
@@ -1367,7 +1358,7 @@ def init_command(args):
         log_fatal('Already initialized with at least one peer. If you want to add a new peer, use `vad add`.')
 
     if len(state.peers) == 0:
-        update_command(None)
+        update_command(Args())
 
     account_number = get_account_number(state, args.passname)
 
@@ -1384,7 +1375,7 @@ def init_command(args):
         log_info('Initialized with one peer, you can now use `vad up`')
 
 
-def add_command(args):
+def add_command(args: Args):
     if args.count <= 0 and args.count < 100:
         log_warn('N should be greater than 1 and smaller than 100!')
 
@@ -1399,7 +1390,7 @@ def add_command(args):
         account = mullvad.account()
 
         if not account.is_active():
-            log_fatal('Your account is expired (since %s)!' % account['expires'])
+            log_fatal('Your account is expired (since %s)!' % str(account.expiry))
 
         for _ in range(args.count):
             if not account.can_add_peers():
@@ -1476,28 +1467,23 @@ def generate_private_key() -> str:
 
 def get_public_key(private_key: str) -> str:
     process = subprocess.Popen(['wg', 'pubkey'], stdout=subprocess.PIPE, stdin=subprocess.PIPE)
-    process.stdin.write(bytes('%s\n' % private_key, 'utf8'))
-    process.stdin.close()
-    stdout = process.stdout.read()
-    process.stdout.close()
+    if process.stdin is not None:
+        process.stdin.write(bytes('%s\n' % private_key, 'utf8'))
+        process.stdin.close()
+    output: bytes = b''
+    if process.stdout is not None:
+        output = process.stdout.read()
+        process.stdout.close()
     process.terminate()
-    return str(stdout, 'utf8').strip()
+    return str(output, 'utf8').strip()
 
 
-def get_this_peer(peer: Peer, mullvad: MullvadAuth):
+def get_this_peer(peer: Peer, mullvad: MullvadAuth) -> Optional[MullvadPeer]:
     public_key = get_public_key(peer.private_key)
     return mullvad.peer_by_public_key(public_key)
 
 
-def print_peer_table(peers: List[MullvadPeer], mapped_peers, show_ipv6, show_peer_id):
-    add_peer = lambda current, peer: table.add_row(
-        [current, peer.created] +
-        ([peer.id] if show_peer_id else []) +
-        [peer.name.title(), peer.ipv4_address] +
-        ([peer.ipv6_address] if show_ipv6 else []) +
-        [peer.pubkey]
-    )
-
+def print_peer_table(peers: List[MullvadPeer], mapped_peers: List[MullvadPeer], show_ipv6: bool, show_peer_id: bool):
     fields = ['Index', 'Created']
 
     if show_peer_id:
@@ -1515,17 +1501,22 @@ def print_peer_table(peers: List[MullvadPeer], mapped_peers, show_ipv6, show_pee
     table.align['Name'] = 'l'
     table.align['IPv4'] = 'r'
     table.align['IPv6'] = 'r'
-    for idx, peer in enumerate(mapped_peers):
-        if peer:
-            add_peer(str(idx), peer)
     for peer in peers:
         if peer in mapped_peers:
-            continue
-        add_peer('', peer)
+            idx = str(mapped_peers.index(peer))
+        else:
+            idx = ''
+        table.add_row(
+            [idx, peer.created] +
+            ([peer.id] if show_peer_id else []) +
+            [peer.name.title(), peer.ipv4_address] +
+            ([peer.ipv6_address] if show_ipv6 else []) +
+            [peer.pubkey]
+        )
     print(table)
 
 
-def info_command(args: Args, parser_up: ArgumentParser):
+def info_command(args: Args):
     become_root()
 
     state = state_load(args.config, auto_save=True)
@@ -1534,13 +1525,14 @@ def info_command(args: Args, parser_up: ArgumentParser):
     with Mullvad().authenticate(account_number, state.access_token) as mullvad:
         state.access_token = mullvad.access_token
 
-        account = mullvad.account()
-        peers = mullvad.peers()
+        account: MullvadAccount = mullvad.account()
+        peers: List[MullvadPeer] = mullvad.peers()
 
-        mapped_peers = []
+        mapped_peers: List[MullvadPeer] = []
         for peer in state.peers:
             peer_mullvad = get_this_peer(peer, mullvad)
-            mapped_peers.append(peer_mullvad)
+            if peer_mullvad is not None:
+                mapped_peers.append(peer_mullvad)
 
         print('Account number: ', end='')
         if args.show_account_number:
@@ -1572,7 +1564,7 @@ def info_command(args: Args, parser_up: ArgumentParser):
         print('vad up ' + ' '.join(state.up_command))
 
 
-def show_command(args):
+def show_command(_: Args):
     become_root()
 
     state = state_load()
@@ -1624,7 +1616,7 @@ def create_network_namespace(namespace_new: str):
     run_or_fail(["ip", "netns", "exec", namespace_new, "sysctl", 'net.ipv4.ping_group_range=0 2147483647'])
 
 
-def path_selection(relays: List[Relay], path: List[str], owned_entry: bool, uniform_by_country: bool):
+def path_selection(relays: List[Relay], path: List[str], owned_entry: bool, uniform_by_country: bool) -> List[Relay]:
     selected_path = [
         relay_random_choice(
             filter_relays(
@@ -1652,7 +1644,7 @@ def path_selection(relays: List[Relay], path: List[str], owned_entry: bool, unif
     return selected_path
 
 
-def path_selection_default(relays: list = None):
+def path_selection_default(relays: List[Relay]) -> List[Relay]:
     # (1) Select a entry relay
     #     (a) Select a trust worthy VPN provider uniform at random
     #     (b) Select a relay from this provider uniform at random
@@ -1668,28 +1660,27 @@ def path_selection_default(relays: list = None):
     #     (d) Infer and/or measure AS’s from exit to destination
     #     (e) Make sure both AS sets do not intersect, if they do, go back to the beginning
 
-    relays_by_vpn = defaultdict(list)
+    relays_by_provider: Dict[str, List[Relay]] = defaultdict(list)
     for relay in relays:
-        relays_by_vpn[relay['vpn']].append(relay)
-    relays = relays_by_vpn
-    providers = list(relays_by_vpn.keys())
+        relays_by_provider[relay.provider].append(relay)
+    providers = list(relays_by_provider.keys())
 
     # (1) Select a entry relay
     entry_provider = random.choice(providers)
-    entry_relay = random.choice(relays[entry_provider])
+    entry_relay = random.choice(relays_by_provider[entry_provider])
     providers.remove(entry_provider)
 
     # (2) Select a middle relay
     middle_provider = random.choice(providers)
-    middle_relay = random.choice(relays[middle_provider])
+    middle_relay = random.choice(relays_by_provider[middle_provider])
     providers.remove(middle_provider)
 
     # (3) Select a exit relay
     # WARN: For (c) and (d) we do not use full ASN path interference and use the provider attribute as a proxy.
     exit_provider = random.choice(providers)
-    relays = list(filter(lambda relay: relay['provider'] != entry_relay['provider'], relays[exit_provider]))
-    exit_relay_idx = random.randint(0, len(relays)-1)
-    exit_relay = relays[exit_relay_idx]
+    relays_selected = list(filter(lambda relay: relay.asn != entry_relay.asn, relays_by_provider[exit_provider]))
+    exit_relay_idx = random.randint(0, len(relays_selected)-1)
+    exit_relay = relays_selected[exit_relay_idx]
 
     return [entry_relay, middle_relay, exit_relay]
 
@@ -1780,7 +1771,6 @@ def create_hop_table(hops: List[Hop | MultiHop], title: str):
     idx = 0
     for hop in hops:
         if isinstance(hop, MultiHop):
-            hop: MultiHop
             index    = '%d\n%d' % (idx, idx+1)
             country  = '%s\n%s' % (hop.entry.country_name , hop.exit.country_name)
             city     = '%s\n%s' % (hop.entry.city_name    , hop.exit.city_name)
@@ -1793,7 +1783,6 @@ def create_hop_table(hops: List[Hop | MultiHop], title: str):
             table.add_row([index, country, city, hostname, ip, port, provider, asn])
             idx += 2
         else:
-            hop: Hop
             index    = '%d' % (idx)
             country  = '%s' % (hop.relay.country_name)
             city     = '%s' % (hop.relay.city_name)
@@ -1843,25 +1832,25 @@ def up_command(args: Args, parser_up: ArgumentParser):
             args.__dict__[key] = value
 
     if args.update_relay_list:
-        update_command(None)
+        update_command(Args())
 
     peers = state.peers
     if len(peers) == 0:
         log_fatal('No peers configured (use `vad init` to create a peer)!')
 
-    hops = len(args.COUNTRY_CITY_HOSTNAME)
+    num_hops = len(args.COUNTRY_CITY_HOSTNAME)
     if len(args.COUNTRY_CITY_HOSTNAME) == 1 and args.COUNTRY_CITY_HOSTNAME[0] == 'default':
-        hops = 3
+        num_hops = 3
         args.without_multihop = True
 
     if not args.without_multihop:
-        needed = math.ceil(hops / 2) - len(peers)
+        needed = math.ceil(num_hops / 2) - len(peers)
         if needed > 0:
-            log_fatal('You do not have enough peers to build a %d hop tunnel. With multihop you need at least %d more peer(s) (use `vad init --add-peer`)' % (hops, needed))
+            log_fatal('You do not have enough peers to build a %d hop tunnel. With multihop you need at least %d more peer(s) (use `vad init --add-peer`)' % (num_hops, needed))
     else:
-        needed = hops - len(peers)
+        needed = num_hops - len(peers)
         if needed > 0:
-            log_fatal('You do not have enough peers to build a %d hop tunnel. Without multihop you need at least %d more peer(s) (use `vad init --add-peer`)' % (hops, needed))
+            log_fatal('You do not have enough peers to build a %d hop tunnel. Without multihop you need at least %d more peer(s) (use `vad init --add-peer`)' % (num_hops, needed))
 
     if len(args.COUNTRY_CITY_HOSTNAME) == 0:
         args.COUNTRY_CITY_HOSTNAME = ['w']
@@ -1877,8 +1866,8 @@ def up_command(args: Args, parser_up: ArgumentParser):
             owned_entry=args.owned_entry,
             uniform_by_country=args.uniform_by_country,
         )
-        if None in path_relays:
-            log_fatal('Filter criteria "%s" does not return any relay!' %  args.COUNTRY_CITY_HOSTNAME[relays.index(None)])
+        if EmptyRelay in path_relays:
+            log_fatal('Filter criteria "%s" does not return any relay!' %  args.COUNTRY_CITY_HOSTNAME[path_relays.index(EmptyRelay)])
 
         if len(path_relays) != len(args.COUNTRY_CITY_HOSTNAME):
             log_fatal("Could not chose unique relays for all hops! Please try again or use wider filter criteria.")
@@ -1902,6 +1891,7 @@ def up_command(args: Args, parser_up: ArgumentParser):
         log_verbose("Was already active, do a partial tear down.")
         down_command(Args(config=args.config, namespace_target=args.namespace_target, namespace_source=args.namespace_source, partial=True))
 
+    physical_already_existed = True
     if args.namespace_source == NAMESPACE_PHYSICAL:
         physical_already_existed = physical_namespace_set_up()
 
@@ -2194,8 +2184,8 @@ def list_command(args):
             if args.show_column_ipv6:
                 values.append(relay.ipv6)
 
-            values.append(relay.multihop_port)
-            values.append(relay.gigabit_per_second)
+            values.append(str(relay.multihop_port))
+            values.append(str(relay.gigabit_per_second))
 
             if args.show_column_public_key:
                 values.append(relay.public_key)
@@ -2335,7 +2325,7 @@ def get_rp_address(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_
 # TODO: Rate limiting (DoS)
 # TODO: Only supportes one client
 # NOTE: Assumption: Every unique (protcol, private address, port) combination is mapped to the same public combination
-def introduction_point_service(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, our_rp_address: Tuple[str, int], port_service: int) -> Tuple[str, bytes]:
+def introduction_point_service(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, our_rp_address: Tuple[str, int], port_service: int) -> Tuple[str, X25519PublicKey, Tuple[str, int]]:
     udp = get_socket_proxy_client(proxy_address)
 
     conn = NoiseConnection.from_name(b'Noise_IK_25519_ChaChaPoly_BLAKE2s')
@@ -2378,7 +2368,7 @@ def introduction_point_service(key: X25519PrivateKey, proxy_address: Tuple[str, 
 
     noise.send(ipv6.packed + struct.pack('!H', int(port_service)))
     noise.recv(2048)
-    return ipv6.ip, peer_public_key, ipv4_unpack(their_rp_address)
+    return str(ipv6.ip), peer_public_key, ipv4_unpack(their_rp_address)
 
 
 # TODO: DoS is possible (Exhaust resources with added wireguard peers)
@@ -2423,8 +2413,6 @@ def start_command(args: Args):
     # if not is_active():
     #     up_command(Args(**up_command_defaults), True)
 
-    ipv4 = get_my_public_ip()
-
     introduction_point_thread = None
     stop_event = None
     service_process = None
@@ -2438,14 +2426,14 @@ def start_command(args: Args):
 
         local_rp_port = random.randint(40000, 2**16)
         rp_address = get_rp_address(SERVICE_KEY, PROXY_ADDRESS, PROXY_KEY.public_key(), local_rp_port)
-        rp_ip, rp_port = rp_address
 
         introduction_point_thread = threading.Thread(target=introduction_point, args=(stop_event, SERVICE_KEY, 'service', 'service0', rp_address, '8000'))
 
-        url = OnionVpnUrl(*PROXY_ADDRESS, PROXY_KEY.public_key().public_bytes_raw())
+        url = OnionVpnUrl(PROXY_ADDRESS[0], PROXY_ADDRESS[1], PROXY_KEY.public_key().public_bytes_raw())
         copy_to_clipboard('vad -v connect ' + str(url))
         log_info('Share this URL with a client: ' + str(url) + " (It does not work with a regular web browser)")
 
+        num_hops = 0
         create_network_namespace('service')
         wireguard_init('service', 'service0', NAMESPACE_ROOT, to_base64(SERVICE_KEY.private_bytes_raw()), local_rp_port)
         wireguard_device_setup('service', 'service0', 'fc00::1', None, 1420 - (num_hops*80))
@@ -2471,7 +2459,7 @@ def start_command(args: Args):
     finally:
         cleanup()
 
-def introduction_point_connect(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, service_public_key: X25519PublicKey, our_rp_address):
+def introduction_point_connect(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, service_public_key: X25519PublicKey, our_rp_address: Tuple[str, int]) -> Optional[Tuple[str, int, Tuple[str, int]]]:
     udp = get_socket_proxy_client(proxy_address)
 
     conn = NoiseConnection.from_name(b'Noise_IK_25519_ChaChaPoly_BLAKE2s')
@@ -2489,7 +2477,7 @@ def introduction_point_connect(key: X25519PrivateKey, proxy_address: Tuple[str, 
     action = data[0]
     if len(data) == 1 and action == RESPONSE_NCK:
         print('Client: No listener for key')
-        return
+        return None
     elif len(data) == 7 and action == RESPONSE_ACK:
         print('Client: Found listener')
         peer = ipv4_unpack(data[1:])
@@ -2511,10 +2499,13 @@ def introduction_point_connect(key: X25519PrivateKey, proxy_address: Tuple[str, 
         data = noise.recv(2048)
         assert len(data) == 18
         ipv6 = ipaddress.IPv6Address(data[0:16])
-        service_port = struct.unpack('!H', data[16:18])[0]
+        service_port: int = struct.unpack('!H', data[16:18])[0]
         print(f'Client: Got {ipv6}:{service_port}')
         noise.send(bytes([RESPONSE_ACK]))
+
         return str(ipv6), service_port, their_rp_address
+
+    return None
 
 
 def connect_command(args):
@@ -2528,7 +2519,7 @@ def connect_command(args):
 
     log_info('Service Information:', highlight=True)
     log('- ip address: ' + url.ipv4)
-    log('- introduction point port: ' + url.port_ip)
+    log('- introduction point port: ' + str(url.port_ip))
     log('- service sign public key: ' + to_base64(url.public_key))
 
     # TODO: hardcoded
@@ -2538,14 +2529,18 @@ def connect_command(args):
     our_rp_address = get_rp_address(client_key, PROXY_ADDRESS, PROXY_KEY.public_key(), local_rp_port)
 
     log_info('IP: Connecting to introduction point', highlight=True)
-    our_ipv6, service_port, their_rp_address = introduction_point_connect(client_key, (url.ipv4, int(url.port_ip)), X25519PublicKey.from_public_bytes(url.public_key), SERVICE_KEY.public_key(), our_rp_address)
+    result = introduction_point_connect(client_key, (url.ipv4, int(url.port_ip)), X25519PublicKey.from_public_bytes(url.public_key), SERVICE_KEY.public_key(), our_rp_address)
+    if result is None:
+        return
+    our_ipv6, service_port, their_rp_address = result
     rp_ipv4, rp_port = their_rp_address
     log('IP: Got our ip address from the service: ' + our_ipv6)
 
     try:
+        num_hops = 0
         create_network_namespace('client')
         wireguard_init('client', 'client0', NAMESPACE_ROOT, to_base64(client_key.private_bytes_raw()), local_rp_port)
-        wireguard_device_setup('client', 'client0', our_ipv6, None, 1420 - (num_hops*80))
+        wireguard_device_setup('client', 'client0', None, our_ipv6, 1420 - (num_hops*80))
         wireguard_add_peer('client', 'client0', to_base64(SERVICE_KEY.public_key().public_bytes_raw()), endpoint=f'{rp_ipv4}:{rp_port}', allowed_ips='fc00::1/128', persistent_keepalive=25)
         with NetworkNamespace('client'):
             run(['ping', '-c', '5', '-6', 'fc00::1'])
@@ -2555,7 +2550,7 @@ def connect_command(args):
         remove_network_namespace('client')
 
 
-def install_command(args):
+def install_command(_: Args):
     become_root()
 
     config = service_config()
@@ -2565,7 +2560,7 @@ def install_command(args):
     os.makedirs(config.systemd_prefix, exist_ok=True)
 
     log_verbose("Copy vad into %s" % config.bin_prefix)
-    shutil.copyfile(os.path.abspath(os.sys.argv[0]), config.bin_path)
+    shutil.copyfile(os.path.abspath(sys.argv[0]), config.bin_path)
     os.chmod(config.bin_path, 0o755)
 
     log_verbose("Install udev rule %s" % config.rule_path)
@@ -2603,13 +2598,13 @@ def install_command(args):
     log_success("Successfully installed udev rule, services and timers!")
 
 
-def uninstall_command(args):
+def uninstall_command(_: Args):
     become_root()
 
     config = service_config()
 
     log_verbose("Disable services/timers:")
-    for type, filename, content in config.systemd_units:
+    for _, filename, _ in config.systemd_units:
         run(['systemctl', 'disable', os.path.basename(filename)], failure_ok=True)
 
     log_verbose("Unlink %s" % config.bin_path)
@@ -2618,7 +2613,7 @@ def uninstall_command(args):
     log_verbose("Remove udev rule %s" % config.rule_path)
     remove_file_if_exists(config.rule_path)
 
-    for type, filename, content in config.systemd_units:
+    for _, filename, _ in config.systemd_units:
         remove_file_if_exists(filename)
 
     log_verbose("Reload udev rules")
@@ -2628,7 +2623,7 @@ def uninstall_command(args):
 def menu_select_one(selection, default):
     while True:
         digits_total = int(math.ceil(math.log10(len(selection))))
-        for idx, (key, value) in enumerate(selection):
+        for idx, (_, value) in enumerate(selection):
             index = idx+1
             index_format = '%%%ds' % digits_total
             print(colored(index_format, 'green') % str(index) + ' %s' % value)
@@ -2680,7 +2675,6 @@ def rotate_command(args: Args, parser_up: ArgumentParser):
     become_root()
 
     state = state_load(args.config, auto_save=True)
-    account_number = get_account_number(state, args.passname)
 
     with Mullvad().authenticate(get_account_number(state, args.passname), state.access_token) as mullvad:
         state.access_token = mullvad.access_token
@@ -2701,7 +2695,7 @@ def rotate_command(args: Args, parser_up: ArgumentParser):
     log_success("Successfully rotated WireGuard keys of all mapped peers")
 
     if is_active(state):
-        up_command(parser_up.parse_args(state.up_command), True)
+        up_command(parser_up.parse_args(state.up_command), parser_up)
 
 
 def reset_command(args: Args):
@@ -2722,13 +2716,13 @@ def reset_command(args: Args):
 
 def check_unique_city_codes(relays: List[Relay]):
     country_cities = set([(relay.country_code, relay.city_code) for relay in relays])
-    city_counter = Counter([city for country, city in country_cities])
+    city_counter = Counter([city for _, city in country_cities])
 
     for city, count in city_counter.items():
         if count > 1:
             duplicates = set()
             for relay in relays:
-                if city == relay['city_code']:
+                if city == relay.city_code:
                     duplicates.add('%s (%s), %s (%s)' % (relay.country_name, relay.country_code, relay.city_name, relay.city_code))
             log_warn("Attention, the city code '%s' is not unique:" % city)
             for text in duplicates:
@@ -2743,7 +2737,7 @@ def check_special_country_codes_not_in_use(relays: List[Relay]):
             log_warn("Attention, the special country code 'ec' used by this program is in use by a relay. This makes this relay unselectable! (%s)" % str(relay))
 
 
-def update_command(args):
+def update_command(_: Args):
     become_root()
 
     os.makedirs('/etc/vad', exist_ok=True)
@@ -2834,15 +2828,6 @@ class TestCase(unittest.TestCase):
         for key, value in self.main_module.items():
             module.__dict__[key] = value
 
-    def inject_get_response(self, code, content):
-        response = Response()
-        response.status_code = code
-        response._content = bytes(content, "utf8")
-        requests.get = lambda x: response
-
-    def throw_exception(self, arg):
-        raise Exception("Some exception")
-
     def assertExit(self, func):
         with self.assertRaises(SystemExit):
             func()
@@ -2863,7 +2848,8 @@ class TestRelayRandomChoice(TestCase):
         N = 1000
         for _ in range(N):
             relay = relay_random_choice(relays, uniform_by_country=True)
-            countries[relay.country_code] += 1
+            if relay is not EmptyRelay:
+                countries[relay.country_code] += 1
 
         result = np.array(list(countries.values()))
         expected = np.array([N/len(countries)] * len(countries.values()))
@@ -2932,7 +2918,7 @@ class TestMullvadIntegration(unittest.TestCase):
             self.assertTrue(len(relays) > 200)
             self.assertEqual(type(relays[0]), MullvadRelay)
 
-            with api.authenticate(user_request_account_number('web/mullvad', dict())) as auth:
+            with api.authenticate(user_request_account_number('web/mullvad')) as auth:
                 public_key = str(base64.encodebytes(os.urandom(32)), 'utf8').strip()
                 public_key2 = str(base64.encodebytes(os.urandom(32)), 'utf8').strip()
 
@@ -2955,11 +2941,11 @@ class TestMullvadIntegration(unittest.TestCase):
 
 class TestOnionVpnUrl(unittest.TestCase):
     def test(self):
-        url = OnionVpnUrl('123.45.6.78', '6666', bytes([1]*32))
+        url = OnionVpnUrl('123.45.6.78', 6666, bytes([1]*32))
         url_ = OnionVpnUrl.from_url(str(url))
 
         self.assertEqual(url.ipv4, '123.45.6.78')
-        self.assertEqual(url.port_ip, '6666')
+        self.assertEqual(url.port_ip, 6666)
         self.assertEqual(url.public_key, bytes([1]*32))
 
         self.assertIsInstance(url.ipv4, str)
@@ -3026,11 +3012,11 @@ def get_default_arguments(parser: ArgumentParser) -> Args:
 
 
 def is_default_arguments(parser: ArgumentParser, current_args: Args) -> bool:
-    current_args = vars(current_args)
+    args = vars(current_args)
     default_args = vars(parser.parse_args([]))
     is_default = True
     for key, value in default_args.items():
-        if not key in current_args or value != current_args[key]:
+        if not key in args or value != args[key]:
             is_default = False
     return is_default
 
@@ -3039,36 +3025,34 @@ def vad():
     parser = argparse.ArgumentParser(
         prog="vad",
         description="An alternative command line interface (CLI) for Mullvad that is based on network namespaces and supports up to ten hops.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     parser.add_argument('-p', '--print-args', action='store_true', help='Output parsed args.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Output verbose information.')
-    parser.add_argument('-n', '--no-color', action='store_true', help='Never color output')
+    parser.add_argument('-n', '--no-color', action='store_true', help='Never output color')
     parser.add_argument('-c', '--config', help='Use this configuration file', default=CONFIGURATION)
     parser.set_defaults(func=show_command)
 
     subparsers = parser.add_subparsers()
-    subparser_args = dict(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
 
-    init = subparsers.add_parser('init', help='Initalize Mullvad VPN by asking the user for the account number and adding one peer. The account number will be saved.', **subparser_args)
+    init = subparsers.add_parser('init', help='Initalize Mullvad VPN by asking the user for the account number and adding one peer. The account number will be saved.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     init.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     init.add_argument('-d', '--dont-save-account-number', action='store_true', help='Does not save the account number into the configuration file. Useful if you have the account number in `pass`.')
     init.set_defaults(func=init_command)
 
-    add = subparsers.add_parser('add', help='Adding new peers from your account to this computer. Every new peer enables at least one hop. In a multihop configuration (https://mullvad.net/de/help/multihop-wireguard) every peer enables two hops. Normally 5 peers are possible per account, this allows a maximum of ten hops.', **subparser_args)
+    add = subparsers.add_parser('add', help='Adding new peers from your account to this computer. Every new peer enables at least one hop. In a multihop configuration (https://mullvad.net/de/help/multihop-wireguard) every peer enables two hops. Normally 5 peers are possible per account, this allows a maximum of ten hops.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     add.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     add.add_argument('count', metavar='N', type=int, nargs='?', default=1, help='Number of peers to add, useful if you do not want to save your account number and want to add more than one peer.')
     add.set_defaults(func=add_command)
 
-    delete = subparsers.add_parser('delete', help='Delete mapped peer(s) from this computer and your account.', **subparser_args)
+    delete = subparsers.add_parser('delete', help='Delete mapped peer(s) from this computer and your account.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     delete.add_argument('--all', action='store_true', help='Delete all mapped peers.')
     delete.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     delete.add_argument('INDEX_PUBLIC_KEY', nargs='?', metavar='INDEX_PUBLIC_KEY', help='Delete specified mapped peer from this computer and your account. You can do that with the index (`vad info`) or the public key. CAUTION: The index of the other peers changes after deletion. You can use the public key to delete non mapped peers.')
     delete.set_defaults(func=delete_command)
 
-    info = subparsers.add_parser('info', help='View account information and highlight peers added to this computer.', **subparser_args)
+    info = subparsers.add_parser('info', help='View account information and highlight peers added to this computer.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     info.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     info.add_argument('-a', '--show-account-number', action='store_true', help='Shows the account number.')
     info.add_argument('-s', '--show-peer-ids', action='store_true', help='Show peer ids.')
@@ -3098,15 +3082,15 @@ def vad():
     down.add_argument('-b', '--namespace-source', help='EXPERIMENTAL: Specific the source namespace', default=NAMESPACE_PHYSICAL)
     down.set_defaults(func=down_command)
 
-    exec = subparsers.add_parser('exec', aliases=['e'], help='Execute command in the physical namespace. The command can use the physical network interfaces directly.', **subparser_args)
+    exec = subparsers.add_parser('exec', aliases=['e'], help='Execute command in the physical namespace. The command can use the physical network interfaces directly.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     exec.add_argument('-n', '--namespace', nargs='?', help=f'Specify the namespace you want to execute the command in', default=NAMESPACE_PHYSICAL)
     exec.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to execute in the specified namespace with or without arguments.')
     exec.set_defaults(func=exec_command)
 
-    show = subparsers.add_parser('show', aliases=['s'], help='Show vpn status information, return 0 if active otherwise 1.', **subparser_args)
+    show = subparsers.add_parser('show', aliases=['s'], help='Show vpn status information, return 0 if active otherwise 1.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     show.set_defaults(func=show_command)
 
-    list = subparsers.add_parser('list', aliases=['l'], help='List, filter and group relays.', **subparser_args)
+    list = subparsers.add_parser('list', aliases=['l'], help='List, filter and group relays.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     list.add_argument('COUNTRY_CITY_HOSTNAME', nargs='?', help='Select relay by country code (e.g. de), city code (e.g. dus) or hostname if it contains this substring (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters.')
     list.add_argument('-c', '--group-by-country', action='store_true', help='Group and count by country.')
     list.add_argument('-y', '--group-by-country-city', action='store_true', help='Group and count by country and city.')
@@ -3164,7 +3148,7 @@ def vad():
 
     global colored
     if args.no_color:
-        colored = nop_colored
+        colored = partial(colored, no_color=True)
 
     if args.print_args:
         if os.geteuid() == 0:
@@ -3173,7 +3157,7 @@ def vad():
     try:
         if not 'func' in args:
             parser.print_help()
-        elif args.func in [up_command, info_command, rotate_command]:
+        elif args.func in [up_command, rotate_command]:
             args.func(args, up)
         else:
             args.func(args)
