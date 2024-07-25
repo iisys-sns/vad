@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import traceback
 import argparse
 import atexit
 import base64
@@ -44,7 +43,7 @@ from dataclasses import dataclass
 from dataclasses import is_dataclass
 from dataclasses import field
 from types import UnionType, NoneType
-from typing import Tuple, TypeVar, Type, Set, Dict, Any, List, Optional, Union, NoReturn, Deque, get_type_hints, get_args, get_origin
+from typing import Tuple, TypeVar, Type, Set, Dict, Any, List, Optional, Union, NoReturn, Deque, Iterable, get_type_hints, get_args, get_origin
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -66,11 +65,11 @@ DEVICE_NAME_HOP = f'{NAME}%d'
 CONFIGURATION = f'{PREFIX}/{NAME}/config.yaml'
 STATE = f'{RUN_DIR}/state'
 PROVIDER_DIR = f'{PREFIX}/{NAME}'
-MULLVAD_RELAYS = f'{PROVIDER_DIR}/mullvad.json'
 NAMESPACE_ROOT = '1'
 NAMESPACE_PHYSICAL = 'physical'
 EUROPE_UNION = ["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu", "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se"]
 EUROPE_CONTINENT = EUROPE_UNION + ["is", "no", "li", "ch", "uk", "gb", "me", "mk", "al", "rs", "tr", "ba", "xk", "am", "az", "by", " md", "ge", "ua"]
+SUPPORTED_PROVIDERS = ['mullvad']
 
 
 ACTION_LISTEN = 0
@@ -627,9 +626,20 @@ class MullvadToken(Base):
 
 
 @dataclass
-class State(Base):
+class StateMullvad(Base):
     account_number: Optional[str] = None
     access_token: Optional[MullvadToken] = None
+
+
+@dataclass
+class StateProvider(Base):
+    mullvad: StateMullvad = field(default_factory=StateMullvad)
+
+
+@dataclass
+class State(Base):
+    version: int = 1
+    provider: StateProvider = field(default_factory=StateProvider)
     hops: List[Hop|MultiHop] = field(default_factory=list)
     peers: List[Peer] = field(default_factory=list)
     pre_up: List[str] = field(default_factory=list)
@@ -1195,10 +1205,7 @@ def get_dns_server_from_flags(flags):
         return '100.64.0.%d' % bits
 
 
-def load_relays(providers: Optional[List[str]] = None) -> List[Relay]:
-    if providers is not None and 'mullvad' in providers and not os.path.exists(MULLVAD_RELAYS):
-        log_fatal('%s does not exists, please use `vad update`, `vad up --update-relay-list` or `vad init`.' % MULLVAD_RELAYS)
-
+def load_relays(providers: Optional[Iterable[str]] = None) -> List[Relay]:
     relays = []
     for provider_filename in glob.glob(os.path.join(PROVIDER_DIR, '*.json')):
         provider = os.path.basename(provider_filename)
@@ -1207,6 +1214,9 @@ def load_relays(providers: Optional[List[str]] = None) -> List[Relay]:
             continue
         with open(provider_filename, 'r') as file:
             relays.extend([from_dict(Relay, relay) for relay in json.load(file)])
+
+    if len(relays) == 0:
+        log_fatal('No `%s/*.json` files do exists, please use `vad update`, `vad up --update-relay-list` or `vad init`.' % PROVIDER_DIR)
 
     return relays
 
@@ -1281,10 +1291,10 @@ def user_request_account_number(passname):
 
 
 def get_account_number(state: State, passname: str):
-    if state.account_number is None:
+    if state.provider.mullvad.account_number is None:
         return user_request_account_number(passname)
     else:
-        return state.account_number
+        return state.provider.mullvad.account_number
 
 
 state: Optional[State] = None
@@ -1315,11 +1325,10 @@ def state_load(config_filename: str = CONFIGURATION, state_filename: str = STATE
 
         return new_state
     except ParseError as e:
-        traceback.print_exception(e)
         log_fatal("Parsing '%s' failed: %s" % (state_filename, str(e)))
 
 
-def init_command(args):
+def init_command(args: Args):
     become_root()
 
     no_configuration_file_exists = not os.path.exists(CONFIGURATION)
@@ -1354,25 +1363,37 @@ def init_command(args):
 
     state = state_load(args.config, auto_save=True)
 
-    if len(state.peers) > 0:
-        log_fatal('Already initialized with at least one peer. If you want to add a new peer, use `vad add`.')
+    if args.provider not in SUPPORTED_PROVIDERS:
+        log_fatal('Provider %s is not supported!' % args.provider)
 
-    if len(state.peers) == 0:
+    count = 0
+    for peer in state.peers:
+        if peer.provider == args.provider:
+            count += 1
+
+    if count > 0:
+        if args.provider == 'mullvad':
+            log_fatal('Already initialized with at least one peer. If you want to add a new peer, use `vad add`.')
+        else:
+            log_fatal('Already initialized with at least one peer. If you want to add a new peer, use `vad add --provider=%s`.' % args.provider)
+
+    if count == 0:
         update_command(Args())
 
-    account_number = get_account_number(state, args.passname)
+    if args.provider == 'mullvad':
+        account_number = get_account_number(state, args.passname)
 
-    with Mullvad().authenticate(account_number, state.access_token) as mullvad:
-        state.access_token = mullvad.access_token
+        with Mullvad().authenticate(account_number, state.provider.mullvad.access_token) as mullvad:
+            state.provider.mullvad.access_token = mullvad.access_token
 
-        add_command(Args(config=args.config, passname=args.passname, count=1))
+            add_command(Args(config=args.config, provider='mullvad', passname=args.passname, count=1))
 
-        if args.dont_save_account_number:
-            state.account_number = None
-        else:
-            state.account_number = account_number
+            if args.dont_save_account_number:
+                state.provider.mullvad.account_number = None
+            else:
+                state.provider.mullvad.account_number = account_number
 
-        log_info('Initialized with one peer, you can now use `vad up`')
+            log_info('Initialized with one peer, you can now use `vad up`')
 
 
 def add_command(args: Args):
@@ -1382,80 +1403,102 @@ def add_command(args: Args):
     become_root()
 
     state = state_load(args.config, auto_save=True)
-    account_number = get_account_number(state, args.passname)
 
-    with Mullvad().authenticate(account_number, state.access_token) as mullvad:
-        state.access_token = mullvad.access_token
+    if args.provider not in SUPPORTED_PROVIDERS:
+        log_fatal('Provider %s is not supported!' % args.provider)
 
-        account = mullvad.account()
+    if args.provider == 'mullvad':
+        account_number = get_account_number(state, args.passname)
 
-        if not account.is_active():
-            log_fatal('Your account is expired (since %s)!' % str(account.expiry))
+        with Mullvad().authenticate(account_number, state.provider.mullvad.access_token) as mullvad:
+            state.provider.mullvad.access_token = mullvad.access_token
 
-        for _ in range(args.count):
-            if not account.can_add_peers():
-                log_fatal('You can not add more peers to your account, your account is full!')
+            account = mullvad.account()
 
-            private_key = generate_private_key()
-            public_key = get_public_key(private_key)
+            if not account.is_active():
+                log_fatal('Your account is expired (since %s)!' % str(account.expiry))
 
-            peer: MullvadPeer = mullvad.peer_create(public_key)
+            for _ in range(args.count):
+                if not account.can_add_peers():
+                    log_fatal('You can not add more peers to your account, your account is full!')
 
-            state.peers.append(Peer(
-                dns=None,
-                private_key=private_key,
-                ipv4=peer.ipv4_address,
-                ipv6=peer.ipv6_address,
-                provider='mullvad',
-            ))
+                private_key = generate_private_key()
+                public_key = get_public_key(private_key)
 
-            log_info('New peer added: %s' % peer.pubkey)
+                peer: MullvadPeer = mullvad.peer_create(public_key)
+
+                state.peers.append(Peer(
+                    dns=None,
+                    private_key=private_key,
+                    ipv4=peer.ipv4_address,
+                    ipv6=peer.ipv6_address,
+                    provider='mullvad',
+                ))
+
+                log_info('New peer added: %s' % peer.pubkey)
 
 
 def delete_command(args):
     become_root()
 
     state = state_load(args.config, auto_save=True)
-    account_number = get_account_number(state, args.passname)
 
-    with Mullvad().authenticate(account_number, state.access_token) as mullvad:
-        state.access_token = mullvad.access_token
-
-        peers = []
-        public_keys = []
-        if not args.all and args.INDEX_PUBLIC_KEY is None:
-            log_warn('Specify an index, a public key or use `--all`')
-            return
-        elif args.all:
-            for peer in state.peers:
-                public_key = get_public_key(peer.private_key)
-                public_keys.append(public_key)
-                peers.append(peer)
-        elif len(args.INDEX_PUBLIC_KEY) == 44:
-            peer = mullvad.peer_by_public_key(args.INDEX_PUBLIC_KEY)
-            if peer is None:
-                log_warn('Peer with public key %s does not exists!' % args.INDEX_PUBLIC_KEY)
-                return
-            public_keys.append(args.INDEX_PUBLIC_KEY)
-        elif len(args.INDEX_PUBLIC_KEY) == 1 and args.INDEX_PUBLIC_KEY[0].isdigit():
-            index = int(args.INDEX_PUBLIC_KEY[0])
-            if index < len(state.peers):
-                peer = state.peers[index]
-                public_key = get_public_key(peer.private_key)
-                public_keys.append(public_key)
-                peers.append(peer)
-            else:
-                log_warn('Peer with index %d does not exists!' % index)
-                return
+    peers = []
+    public_keys = []
+    if not args.all and args.INDEX_PUBLIC_KEY is None:
+        log_warn('Specify an index, a public key or use `--all`')
+        return
+    elif args.all:
+        peers.extend(state.peers)
+    elif len(args.INDEX_PUBLIC_KEY) == 44:
+        public_keys.append(args.INDEX_PUBLIC_KEY)
+    elif len(args.INDEX_PUBLIC_KEY) == 1 and args.INDEX_PUBLIC_KEY[0].isdigit():
+        index = int(args.INDEX_PUBLIC_KEY[0])
+        if index < len(state.peers):
+            peers.append(state.peers[index])
         else:
-            log_warn('INDEX_PUBLIC_KEY is neither a base64 encoded 256 bit public key nor a index (0-9)!')
+            log_warn('Peer with index %d does not exists!' % index)
+            return
+    else:
+        log_warn('INDEX_PUBLIC_KEY is neither a base64 encoded 256 bit public key nor a index (0-9)!')
+        return
+
+
+                # peer =
+                # public_key = get_public_key(peer.private_key)
+
+            # peer = mullvad.peer_by_public_key(args.INDEX_PUBLIC_KEY)
+            # if peer is None:
+            #     log_warn('Peer with public key %s does not exists!' % args.INDEX_PUBLIC_KEY)
+            #     return
+    for peer in peers:
+        if peer.provider == 'mullvad':
+            account_number = get_account_number(state, args.passname)
+            with Mullvad().authenticate(account_number, state.provider.mullvad.access_token) as mullvad:
+                state.provider.mullvad.access_token = mullvad.access_token
+                public_key = get_public_key(peer.private_key)
+                mullvad.peer_remove(public_key)
+                log_info("Deleted peer %s!" % (public_key))
+                state.peers.remove(peer)
+
+    provider_in_use = set([peer.provider for peer in state.peers])
+
+    for public_key in public_keys:
+        is_public_key_unknown = True
+        for provider in provider_in_use:
+            if provider == 'mullvad':
+                account_number = get_account_number(state, args.passname)
+                with Mullvad().authenticate(account_number, state.provider.mullvad.access_token) as mullvad:
+                    peer = mullvad.peer_by_public_key(public_key)
+                    if peer is not None:
+                        mullvad.peer_remove(public_key)
+                        is_public_key_unknown = False
+                        break
+
+        if is_public_key_unknown:
+            log_warn('Peer with public key %s does not exists for any provider!' % public_key)
             return
 
-        for peer in peers:
-            state.peers.remove(peer)
-        for public_key in public_keys:
-            mullvad.peer_remove(public_key)
-            log_info("Deleted peer %s!" % (public_key))
 
 
 def generate_private_key() -> str:
@@ -1483,15 +1526,97 @@ def get_this_peer(peer: Peer, mullvad: MullvadAuth) -> Optional[MullvadPeer]:
     return mullvad.peer_by_public_key(public_key)
 
 
-def print_peer_table(peers: List[MullvadPeer], mapped_peers: List[MullvadPeer], show_ipv6: bool, show_peer_id: bool):
-    fields = ['Index', 'Created']
+@dataclass
+class InfoPeer(Base):
+    id: str
+    name: str
+    public_key: str
+    created: datetime
+    ipv4: str
+    ipv6: str
+    provider: str
 
-    if show_peer_id:
+
+def info_command(args: Args):
+    become_root()
+
+    state = state_load(args.config, auto_save=True)
+
+    provider_in_use = set([peer.provider for peer in state.peers])
+
+    peers: List[InfoPeer] = []
+    mapped_peers: List[InfoPeer] = []
+
+    for provider in provider_in_use:
+        account_number = get_account_number(state, args.passname)
+
+        with Mullvad().authenticate(account_number, state.provider.mullvad.access_token) as mullvad:
+            state.provider.mullvad.access_token = mullvad.access_token
+
+            for peer_mullvad in mullvad.peers():
+                peers.append(
+                    InfoPeer(
+                        id=peer_mullvad.id,
+                        name=peer_mullvad.name,
+                        public_key=peer_mullvad.pubkey,
+                        created=peer_mullvad.created,
+                        ipv4=peer_mullvad.ipv4_address,
+                        ipv6=peer_mullvad.ipv6_address,
+                        provider=provider,
+                    )
+                )
+
+            for peer in state.peers:
+                peer_mullvad = get_this_peer(peer, mullvad)
+                if peer_mullvad is not None:
+                    mapped_peers.append(
+                        InfoPeer(
+                            id=peer_mullvad.id,
+                            name=peer_mullvad.name,
+                            public_key=peer_mullvad.pubkey,
+                            created=peer_mullvad.created,
+                            ipv4=peer_mullvad.ipv4_address,
+                            ipv6=peer_mullvad.ipv6_address,
+                            provider=provider,
+                        )
+                    )
+
+            account: MullvadAccount = mullvad.account()
+
+            print()
+            print(colored('Mullvad:', 'white', attrs=['bold']))
+            print('--------')
+            print('Account number: ', end='')
+            if args.show_account_number:
+                print('(%s)' % account_number)
+            else:
+                print('*' * 16)
+
+            delta = account.expiry - datetime.now()
+            if account.is_active():
+                print('Expires:', end=' ')
+                log_good(str(account.expiry), end=' ')
+                print('(in %d days)' % delta.days)
+            else:
+                print('Expired:', end=' ')
+                log_bad(str(account.expiry), end=' ')
+                print('(since %d days)' % (-1*delta.days))
+
+            print('Peers: ', end='')
+            peers_text = '%s/%s' % (len(peers), account.max_peers())
+            if account.can_add_peers():
+                log_good(peers_text)
+            else:
+                log_warn(peers_text)
+
+    fields = ['Index', 'Provider', 'Created']
+
+    if args.show_peer_ids:
         fields.append('ID')
 
     fields.extend(['Name', 'IPv4'])
 
-    if show_ipv6:
+    if args.show_ipv6:
         fields.append('IPv6')
 
     fields.extend(['Public Key'])
@@ -1507,61 +1632,19 @@ def print_peer_table(peers: List[MullvadPeer], mapped_peers: List[MullvadPeer], 
         else:
             idx = ''
         table.add_row(
-            [idx, peer.created] +
-            ([peer.id] if show_peer_id else []) +
-            [peer.name.title(), peer.ipv4_address] +
-            ([peer.ipv6_address] if show_ipv6 else []) +
-            [peer.pubkey]
+            [idx, peer.provider, peer.created] +
+            ([peer.id] if args.show_peer_ids else []) +
+            [peer.name.title(), peer.ipv4] +
+            ([peer.ipv6] if args.show_ipv6 else []) +
+            [peer.public_key]
         )
+
+    print()
     print(table)
 
-
-def info_command(args: Args):
-    become_root()
-
-    state = state_load(args.config, auto_save=True)
-    account_number = get_account_number(state, args.passname)
-
-    with Mullvad().authenticate(account_number, state.access_token) as mullvad:
-        state.access_token = mullvad.access_token
-
-        account: MullvadAccount = mullvad.account()
-        peers: List[MullvadPeer] = mullvad.peers()
-
-        mapped_peers: List[MullvadPeer] = []
-        for peer in state.peers:
-            peer_mullvad = get_this_peer(peer, mullvad)
-            if peer_mullvad is not None:
-                mapped_peers.append(peer_mullvad)
-
-        print('Account number: ', end='')
-        if args.show_account_number:
-            print('(%s)' % account_number)
-        else:
-            print('*' * 16)
-
-        delta = account.expiry - datetime.now()
-        if account.is_active():
-            print('Expires:', end=' ')
-            log_good(str(account.expiry), end=' ')
-            print('(in %d days)' % delta.days)
-        else:
-            print('Expired:', end=' ')
-            log_bad(str(account.expiry), end=' ')
-            print('(since %d days)' % (-1*delta.days))
-
-        print('Peers: ', end='')
-        peers_text = '%s/%s' % (len(peers), account.max_peers())
-        if account.can_add_peers():
-            log_good(peers_text)
-        else:
-            log_warn(peers_text)
-
-        print()
-        print_peer_table(peers, mapped_peers, args.show_ipv6, args.show_peer_ids)
-        print()
-        log_info('If you only call `vad up` this command will be executed: ', end='')
-        print('vad up ' + ' '.join(state.up_command))
+    print()
+    log_info('If you only call `vad up` this command will be executed: ', end='')
+    print('vad up ' + ' '.join(state.up_command))
 
 
 def show_command(_: Args):
@@ -1582,7 +1665,6 @@ def show_command(_: Args):
                     print()
                     subprocess.run(["ip", "netns", "exec", namespace, "wg"])
         except Exception as e:
-            traceback.print_exception(e)
             log_warn("VPN seemed to be active but something went wrong (%s)" % str(e))
         print()
     else:
@@ -2676,8 +2758,8 @@ def rotate_command(args: Args, parser_up: ArgumentParser):
 
     state = state_load(args.config, auto_save=True)
 
-    with Mullvad().authenticate(get_account_number(state, args.passname), state.access_token) as mullvad:
-        state.access_token = mullvad.access_token
+    with Mullvad().authenticate(get_account_number(state, args.passname), state.provider.mullvad.access_token) as mullvad:
+        state.provider.mullvad.access_token = mullvad.access_token
 
         for peer in state.peers:
             if not peer.provider == 'mullvad':
@@ -2686,6 +2768,7 @@ def rotate_command(args: Args, parser_up: ArgumentParser):
             public_key_new = get_public_key(private_key_new)
             public_key = get_public_key(peer.private_key)
             mullvad_peer = mullvad.peer_update_pubkey(public_key, public_key_new)
+            log_info("%s: Rotate key of peer %s -> %s" % (peer.provider, public_key, public_key_new))
             peer.private_key = private_key_new
             peer.ipv4 = mullvad_peer.ipv4_address
             peer.ipv6 = mullvad_peer.ipv6_address
@@ -2695,7 +2778,8 @@ def rotate_command(args: Args, parser_up: ArgumentParser):
     log_success("Successfully rotated WireGuard keys of all mapped peers")
 
     if is_active(state):
-        up_command(parser_up.parse_args(state.up_command), parser_up)
+        args = Args(**vars(parser_up.parse_args(state.up_command)), config=args.config)
+        up_command(args, parser_up)
 
 
 def reset_command(args: Args):
@@ -2708,8 +2792,8 @@ def reset_command(args: Args):
     # TODO: what to do with source and target namespace?
     down_command(Args(config=args.config, namespace_target=NAMESPACE_ROOT, namespace_source=NAMESPACE_PHYSICAL, partial=False))
 
-    state.account_number = None
-    state.access_token = None
+    state.provider.mullvad.account_number = None
+    state.provider.mullvad.access_token = None
 
     log_success("Successfully reseted")
 
@@ -2737,44 +2821,53 @@ def check_special_country_codes_not_in_use(relays: List[Relay]):
             log_warn("Attention, the special country code 'ec' used by this program is in use by a relay. This makes this relay unselectable! (%s)" % str(relay))
 
 
-def update_command(_: Args):
+def update_command(args: Args):
     become_root()
 
     os.makedirs('/etc/vad', exist_ok=True)
 
-    try:
-        relays: List[Relay] = []
-        for mullvad_relay in Mullvad().relays():
-            relay = Relay(
-                provider           = 'mullvad',
-                hostname           = mullvad_relay.hostname,
-                country_code       = mullvad_relay.country_code,
-                country_name       = mullvad_relay.country_name,
-                city_code          = mullvad_relay.city_code,
-                city_name          = mullvad_relay.city_name,
-                active             = mullvad_relay.active,
-                owned              = mullvad_relay.owned,
-                asn                = mullvad_relay.provider,
-                ipv4               = mullvad_relay.ipv4_addr_in,
-                ipv6               = mullvad_relay.ipv6_addr_in,
-                gigabit_per_second = mullvad_relay.network_port_speed,
-                public_key         = mullvad_relay.pubkey,
-                multihop_port      = mullvad_relay.multihop_port,
-            )
-            relays.append(relay)
+    state = state_load(args.config)
 
-        with open(MULLVAD_RELAYS, 'w') as file:
-            json.dump([relay.to_dict() for relay in relays], file, indent=4)
-        os.chmod(MULLVAD_RELAYS, 0o644)
+    providers = set(['mullvad'])
+    for peer in state.peers:
+        providers.add(peer.provider)
+    providers = list(providers)
 
-        relays = load_relays(['mullvad'])
-        relays = filter_relays(relays)
-        check_unique_city_codes(relays)
-        check_special_country_codes_not_in_use(relays)
-        log_info('%s updated with %d wireguard relays' % (MULLVAD_RELAYS, len(relays)))
-    except Exception as e:
-        traceback.print_exception(e)
-        log_warn('Can not download relays from Mullvad, because of %s' % (str(e)))
+    for provider in providers:
+        if provider == 'mullvad':
+            try:
+                relays: List[Relay] = []
+                for mullvad_relay in Mullvad().relays():
+                    relay = Relay(
+                        provider           = provider,
+                        hostname           = mullvad_relay.hostname,
+                        country_code       = mullvad_relay.country_code,
+                        country_name       = mullvad_relay.country_name,
+                        city_code          = mullvad_relay.city_code,
+                        city_name          = mullvad_relay.city_name,
+                        active             = mullvad_relay.active,
+                        owned              = mullvad_relay.owned,
+                        asn                = mullvad_relay.provider,
+                        ipv4               = mullvad_relay.ipv4_addr_in,
+                        ipv6               = mullvad_relay.ipv6_addr_in,
+                        gigabit_per_second = mullvad_relay.network_port_speed,
+                        public_key         = mullvad_relay.pubkey,
+                        multihop_port      = mullvad_relay.multihop_port,
+                    )
+                    relays.append(relay)
+
+                path = os.path.join(PROVIDER_DIR, provider + '.json')
+                with open(path, 'w') as file:
+                    json.dump([relay.to_dict() for relay in relays], file, indent=4)
+                os.chmod(path, 0o644)
+
+                log_info('%s updated with %d wireguard relays' % (path, len(relays)))
+            except Exception as e:
+                log_warn('Can not download relays from Mullvad, because of %s' % (str(e)))
+
+    relays = load_relays(providers)
+    check_unique_city_codes(relays)
+    check_special_country_codes_not_in_use(relays)
 
 
 def get_network_devices() -> List[Device]:
@@ -3039,10 +3132,12 @@ def vad():
     init = subparsers.add_parser('init', help='Initalize Mullvad VPN by asking the user for the account number and adding one peer. The account number will be saved.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     init.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     init.add_argument('-d', '--dont-save-account-number', action='store_true', help='Does not save the account number into the configuration file. Useful if you have the account number in `pass`.')
+    init.add_argument('-o', '--provider', type=str, nargs='?', default='mullvad', help='Specifices the provider that should be initialized')
     init.set_defaults(func=init_command)
 
     add = subparsers.add_parser('add', help='Adding new peers from your account to this computer. Every new peer enables at least one hop. In a multihop configuration (https://mullvad.net/de/help/multihop-wireguard) every peer enables two hops. Normally 5 peers are possible per account, this allows a maximum of ten hops.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     add.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
+    add.add_argument('-o', '--provider', type=str, nargs='?', default='mullvad', help='Specifices the provider from which (a) peer(s) should be added')
     add.add_argument('count', metavar='N', type=int, nargs='?', default=1, help='Number of peers to add, useful if you do not want to save your account number and want to add more than one peer.')
     add.set_defaults(func=add_command)
 
