@@ -23,6 +23,7 @@ import threading
 import unittest
 import yaml
 import time
+import copy
 
 from datetime import datetime
 from termcolor import colored
@@ -502,6 +503,14 @@ def parse_and_check_type(context: str, base: type, data: Any) -> Any:
         for idx, value in enumerate(data):
             data[idx] = parse_and_check_type(context + '/%d' % idx, args[0], value)
         return data
+    elif get_origin(base) is dict and data_type is dict:
+        args = get_args(base)
+        key_type, value_type = args
+        data_new = dict()
+        for key, value in data.items():
+            key = parse_and_check_type(context + '/%s' % key, key_type, key)
+            data_new[key] = parse_and_check_type(context + '/%s' % key, value_type, value)
+        return data_new
     elif get_origin(base) is UnionType or get_origin(base) is Union:
         errors = []
         for t in get_args(base):
@@ -537,7 +546,6 @@ class Peer(Base):
 
 @dataclass
 class Config(Base):
-    peers: List[Peer] = field(default_factory=list)
     pre_up: List[str] = field(default_factory=list)
     post_up: List[str] = field(default_factory=list)
     pre_down: List[str] = field(default_factory=list)
@@ -547,6 +555,10 @@ class Config(Base):
     def load(filename: str = CONFIGURATION) -> 'Config':
         if not os.path.exists(filename):
             return Config()
+
+        st = os.stat(filename)
+        if st.st_uid == 0 and (st.st_mode & 0o777) == 0o600:
+            log_fatal("%s has %s access rights but should have %s" % (filename, oct(st.st_mode), oct(0o600)))
 
         with open(filename) as c:
             return from_dict(Config, yaml.safe_load(c))
@@ -636,22 +648,49 @@ class StateProvider(Base):
     mullvad: StateMullvad = field(default_factory=StateMullvad)
 
 
+class Active(Enum):
+    Yes = 1
+    Partial = 2
+    No = 3
+
+
 @dataclass
-class State(Base):
-    version: int = 1
-    provider: StateProvider = field(default_factory=StateProvider)
+class Circuit(Base):
+    namespace_source: str
+    namespace_target: str
     hops: List[Hop|MultiHop] = field(default_factory=list)
-    peers: List[Peer] = field(default_factory=list)
     pre_up: List[str] = field(default_factory=list)
     post_up: List[str] = field(default_factory=list)
     pre_down: List[str] = field(default_factory=list)
     post_down: List[str] = field(default_factory=list)
     up_command: List[str] = field(default_factory=list)
 
+    def is_active(self) -> bool:
+        # TODO: `self.hops` could be stale, therefore we should check if it matches reality.
+        #       E.g. check if `vad0` exists in the target namespace and if source and target namespaces actually exists.
+        #       If not it is not active and we must assign an empty list.
+        #       If parts of it exists, that is an error and would require an (partial) down.
+        #       But we should do that in another function.
+        # TODO: Replace result with enum `Active`.
+        return len(self.hops) > 0
+
+
+@dataclass
+class State(Base):
+    version: int = 1
+    circuits: Dict[str, Circuit] = field(default_factory=dict)
+    peers: List[Peer] = field(default_factory=list)
+    provider: StateProvider = field(default_factory=StateProvider)
+
     @staticmethod
     def load(filename: str = STATE) -> 'State':
         if not os.path.exists(filename):
             return State()
+
+        st = os.stat(filename)
+        if st.st_uid != 0 or (st.st_mode & 0o777) != 0o600:
+            print(oct(st.st_mode & 0o777))
+            log_fatal("%s has %s access rights but should have %s" % (filename, oct(st.st_mode), oct(0o600)))
 
         with open(filename) as s:
             data = yaml.safe_load(s)
@@ -661,18 +700,11 @@ class State(Base):
         with open(filename, 'w') as s:
             yaml.dump(self.to_dict(), s)
 
-    def merge_config(self, config: Config):
-        peers: Dict[str, Peer] = {}
-        for peer in self.peers:
-            peers[peer.private_key] = peer
-        for peer in config.peers:
-            peers[peer.private_key] = peer
-        self.peers = list(peers.values())
-        self.pre_up = config.pre_up
-        self.post_up = config.post_up
-        self.pre_down = config.pre_down
-        self.post_down = config.post_down
-        return self
+    def get_circuit(self, namespace_source: str, namespace_target: str):
+        key = '%s-%s' % (namespace_target, namespace_source)
+        if not key in self.circuits:
+            self.circuits[key] = Circuit(namespace_source=namespace_source, namespace_target=namespace_target)
+        return self.circuits[key]
 
 
 class MullvadError(Exception):
@@ -1011,7 +1043,7 @@ def log_bad(text, **kwargs):
     print(colored(text, 'red'), **kwargs)
 
 
-def print_command(process, print_output=True):
+def print_command(process, print_output: bool = True):
     command = subprocess.list2cmdline(process.args)
     command = command.replace('\n','\\n')
 
@@ -1020,12 +1052,17 @@ def print_command(process, print_output=True):
     else:
         log_bad('- ' + command)
 
-    if print_output and len(process.stdout) > 0:
-        lines = str(process.stdout, 'utf8')
-        lines = lines.split('\n')
-        output = '\n  '.join(lines)
-        output = output.strip()
-        print('  ' + output)
+    if print_output:
+        if isinstance(process.stdout, bytes):
+            output = process.stdout
+        else:
+            output = process.stdout.read()
+        if len(output) > 0:
+            lines = str(process.stdout, 'utf8')
+            lines = lines.split('\n')
+            output = '\n  '.join(lines)
+            output = output.strip()
+            print('  ' + output)
 
 
 def to_base64(data: bytes) -> str:
@@ -1170,17 +1207,9 @@ def update_resolvconf(dns):
         if process.stdin is not None:
             process.stdin.write(bytes('nameserver %s\n' % dns, 'utf8'))
             process.stdin.close()
-        if process.stdout is not None:
-            process.stdout.read()
-            process.stdout.close()
-    if VERBOSE:
-        print_command(process)
+        if VERBOSE:
+            print_command(process)
     run(['resolvconf', '-u'])
-
-
-# TODO: Revist this function
-def is_active(state: State):
-    return len(state.hops) > 0
 
 
 def get_dns_server_from_flags(flags):
@@ -1299,24 +1328,14 @@ def get_account_number(state: State, passname: str):
 
 state: Optional[State] = None
 
-def state_load(config_filename: str = CONFIGURATION, state_filename: str = STATE, auto_save: bool = False) -> State:
+def state_load(state_filename: str = STATE, auto_save: bool = False) -> State:
     global state
 
     if state is not None:
         return state
 
-    config = None
-
-    try:
-        config = Config.load(config_filename)
-    except ParseError as e:
-        log_fatal("Parsing '%s' failed: %s" % (config_filename, str(e)))
-
     try:
         new_state = State.load(state_filename)
-
-        if config is not None:
-            new_state = new_state.merge_config(config)
 
         if auto_save:
             atexit.register(lambda: new_state.save())
@@ -1336,7 +1355,6 @@ def init_command(args: Args):
     if no_configuration_file_exists:
         log_info('No configuration file found at "%s". We will create a default configuration file for you that is suitable for systems with NetworkManager under systemd.' % CONFIGURATION)
         config = Config(
-            peers=[],
             pre_up=[
                 "systemctl stop NetworkManager",
                 "systemctl stop wpa_supplicant",
@@ -1361,7 +1379,7 @@ def init_command(args: Args):
         )
         config.save()
 
-    state = state_load(args.config, auto_save=True)
+    state = state_load(auto_save=True)
 
     if args.provider not in SUPPORTED_PROVIDERS:
         log_fatal('Provider %s is not supported!' % args.provider)
@@ -1402,7 +1420,7 @@ def add_command(args: Args):
 
     become_root()
 
-    state = state_load(args.config, auto_save=True)
+    state = state_load(auto_save=True)
 
     if args.provider not in SUPPORTED_PROVIDERS:
         log_fatal('Provider %s is not supported!' % args.provider)
@@ -1441,7 +1459,7 @@ def add_command(args: Args):
 def delete_command(args):
     become_root()
 
-    state = state_load(args.config, auto_save=True)
+    state = state_load(auto_save=True)
 
     peers = []
     public_keys = []
@@ -1463,14 +1481,6 @@ def delete_command(args):
         log_warn('INDEX_PUBLIC_KEY is neither a base64 encoded 256 bit public key nor a index (0-9)!')
         return
 
-
-                # peer =
-                # public_key = get_public_key(peer.private_key)
-
-            # peer = mullvad.peer_by_public_key(args.INDEX_PUBLIC_KEY)
-            # if peer is None:
-            #     log_warn('Peer with public key %s does not exists!' % args.INDEX_PUBLIC_KEY)
-            #     return
     for peer in peers:
         if peer.provider == 'mullvad':
             account_number = get_account_number(state, args.passname)
@@ -1498,7 +1508,6 @@ def delete_command(args):
         if is_public_key_unknown:
             log_warn('Peer with public key %s does not exists for any provider!' % public_key)
             return
-
 
 
 def generate_private_key() -> str:
@@ -1540,7 +1549,7 @@ class InfoPeer(Base):
 def info_command(args: Args):
     become_root()
 
-    state = state_load(args.config, auto_save=True)
+    state = state_load(auto_save=True)
 
     provider_in_use = set([peer.provider for peer in state.peers])
 
@@ -1642,45 +1651,50 @@ def info_command(args: Args):
     print()
     print(table)
 
-    print()
-    log_info('If you only call `vad up` this command will be executed: ', end='')
-    print('vad up ' + ' '.join(state.up_command))
 
-
-def show_command(_: Args):
+def show_command(args: Args):
     become_root()
 
     state = state_load()
 
-    if is_active(state):
-        try:
-            print()
-            print(create_hop_table(state.hops, title=''))
-            print()
-
-            subprocess.run(["wg"])
-            for idx in range(1, 10):
-                namespace = NAMESPACE_HOP % ('1', idx)
-                if network_namespace_exists(namespace):
+    root_providers = []
+    for circuit in state.circuits.values():
+        if circuit.is_active():
+            if circuit.namespace_target == NAMESPACE_ROOT:
+                root_providers.append(circuit.hops[-1].peer.provider)
+            try:
+                print(colored('Active circuit from namespace "%s" to "%s":' % (circuit.namespace_source, circuit.namespace_target), attrs=['bold', 'underline']))
+                if circuit.namespace_target == NAMESPACE_ROOT and circuit.namespace_source == NAMESPACE_PHYSICAL:
                     print()
-                    subprocess.run(["ip", "netns", "exec", namespace, "wg"])
-        except Exception as e:
-            log_warn("VPN seemed to be active but something went wrong (%s)" % str(e))
-        print()
-    else:
-        log_bad("You are not connected to Mullvad.")
-        raise Abort()
+                    log_info('If you only call `vad up` this command will be executed: ', end='')
+                    print('vad up ' + ' '.join(circuit.up_command))
+                    print()
+                print(create_hop_table(circuit.hops))
+                print()
 
-    try:
-        is_mullvad_ip, public_ip = Mullvad().connected()
-        if is_mullvad_ip:
-            log_good('You are connected to Mullvad, your IP address is %s.' % public_ip)
-        else:
-            log_bad('You are not connect to Mullvad, your IP address is %s.' % public_ip)
+                if 'wireguard_interfaces' in args.__dict__ and args.wireguard_interfaces:
+                    namespaces = [circuit.namespace_target]
+                    for idx in range(1, len(circuit.hops)):
+                        namespaces.append(NAMESPACE_HOP % (NAMESPACE_ROOT, idx))
+
+                    for namespace in namespaces:
+                        with NetworkNamespace(namespace):
+                            subprocess.run(["wg"])
+                            print()
+            except Exception as e:
+                log_warn("VPN seemed to be active but something went wrong (%s)" % str(e))
+
+    if 'mullvad' in root_providers:
+        try:
+            is_mullvad_ip, public_ip = Mullvad().connected()
+            if is_mullvad_ip:
+                log_good('You are connected to Mullvad, your IP address is %s.' % public_ip)
+            else:
+                log_bad('You are not connect to Mullvad, your IP address is %s.' % public_ip)
+                raise Abort()
+        except:
+            log_bad("Not able to determine if connected to VPN.")
             raise Abort()
-    except:
-        log_bad("Not able to determine if connected to VPN.")
-        raise Abort()
 
 
 def get_dns_from_args(args):
@@ -1784,8 +1798,8 @@ def path_configure_hops(peers: List[Peer], relays: List[Relay], without_multihop
     if without_multihop:
         for relay in relays:
             hops.append(Hop(
-                get_peer_from_group(peers_by_provider, relay.provider),
-                relay
+                copy.copy(get_peer_from_group(peers_by_provider, relay.provider)),
+                copy.copy(relay)
             ))
     else:
         idx = 0
@@ -1798,9 +1812,9 @@ def path_configure_hops(peers: List[Peer], relays: List[Relay], without_multihop
 
             if has_multihop_support:
                 hops.append(MultiHop(
-                    get_peer_from_group(peers_by_provider, relays[idx].provider),
-                    relays[idx],
-                    relays[idx+1]
+                    copy.copy(get_peer_from_group(peers_by_provider, relays[idx].provider)),
+                    copy.copy(relays[idx]),
+                    copy.copy(relays[idx+1])
                 ))
                 idx += 2
             else:
@@ -1819,7 +1833,7 @@ def path_configure_hops(peers: List[Peer], relays: List[Relay], without_multihop
     return hops
 
 
-def create_hop_table(hops: List[Hop | MultiHop], title: str):
+def create_hop_table(hops: List[Hop | MultiHop]):
     has_multihop = False
     for hop in hops:
         if isinstance(hop, MultiHop):
@@ -1841,7 +1855,7 @@ def create_hop_table(hops: List[Hop | MultiHop], title: str):
         'Provider',
         'ASN',
     ], hrules=hrules)
-    table.title = title
+    table.title = 'Hop configuration with nameserver %s' % hops[-1].peer.dns
     table.align['#'] = 'r'
     table.align['Country'] = 'l'
     table.align['City'] = 'l'
@@ -1887,6 +1901,7 @@ def physical_namespace_set_up():
 
     run(["mkdir", "-p", "/etc/netns/physical"])
     # NOTE: This instructes NetworkManager not to manage /etc/resolv.conf!
+    #       As long as "rc-manager=symlink", which should be standard.
     run(["ln", "-sf", "/var/run/NetworkManager/resolv.conf", "/etc/netns/physical/resolv.conf"])
 
     for device in get_network_devices():
@@ -1899,18 +1914,23 @@ def physical_namespace_set_up():
 def up_command(args: Args, parser_up: ArgumentParser):
     become_root()
 
-    state = state_load(args.config, auto_save=True)
+    state = state_load(auto_save=True)
+
+    circuit = state.get_circuit(namespace_source=args.namespace_source, namespace_target=args.namespace_target)
 
     if not os.path.exists(args.config):
-        if args.config == CONFIGURATION:
-            log_fatal('Default configuration file not found or is not readable (use `vad init` to create one)!')
-        else:
-            log_fatal('Configuration file "%s" not found or is not readable!' % args.config)
+        log_warn('Configuration file "%s" not found or is not readable!' % args.config)
+    else:
+        config = Config.load(args.config)
+        circuit.pre_up = config.pre_up
+        circuit.post_up = config.post_up
+        circuit.pre_down = config.pre_down
+        circuit.post_down = config.post_down
 
     is_default = is_default_arguments(parser_up, args)
 
     if is_default:
-        for key, value in vars(parser_up.parse_args(state.up_command)).items():
+        for key, value in vars(parser_up.parse_args(circuit.up_command)).items():
             args.__dict__[key] = value
 
     if args.update_relay_list:
@@ -1957,19 +1977,19 @@ def up_command(args: Args, parser_up: ArgumentParser):
     hops = path_configure_hops(peers, path_relays, args.without_multihop)
 
     if hops[-1].provider() == 'mullvad':
-        dns_server = get_dns_from_args(args)
+        dns_server = hops[-1].peer.dns = get_dns_from_args(args)
     else:
         dns_server = hops[-1].peer.dns
         if dns_server is None:
             log_fatal("Peer %s has no DNS server, please specify one!" % get_public_key(hops[-1].peer.private_key))
 
-    table_hops = create_hop_table(hops, title='Hop configuration with nameserver %s' % dns_server)
+    table_hops = create_hop_table(hops)
 
     if args.dry_run:
         print(table_hops)
         sys.exit(0)
 
-    if is_active(state):
+    if circuit.is_active():
         log_verbose("Was already active, do a partial tear down.")
         down_command(Args(config=args.config, namespace_target=args.namespace_target, namespace_source=args.namespace_source, partial=True))
 
@@ -1978,7 +1998,7 @@ def up_command(args: Args, parser_up: ArgumentParser):
         physical_already_existed = physical_namespace_set_up()
 
         if not physical_already_existed:
-            run_commands('pre up', state.pre_up)
+            run_commands('pre up', circuit.pre_up)
 
     if args.namespace_target != NAMESPACE_ROOT:
         if not network_namespace_exists(args.namespace_target):
@@ -1986,9 +2006,9 @@ def up_command(args: Args, parser_up: ArgumentParser):
 
     print(table_hops)
 
-    state.hops = []
+    circuit.hops = []
     for hop in hops:
-        state.hops.append(hop)
+        circuit.hops.append(hop)
 
     namespaces = []
     namespaces.append(args.namespace_source)
@@ -2034,11 +2054,11 @@ def up_command(args: Args, parser_up: ArgumentParser):
         update_resolvconf(dns_server)
 
     if not is_default and not args.dont_save:
-        state.up_command = sys.argv[sys.argv.index('up')+1:]
+        circuit.up_command = sys.argv[sys.argv.index('up')+1:]
 
     if args.namespace_source == NAMESPACE_PHYSICAL:
         if not physical_already_existed:
-            run_commands('post up', state.post_up)
+            run_commands('post up', circuit.post_up)
 
     run(['systemctl', 'unmask', 'vad.move@.service'])
     log_success("VPN is successfully up!")
@@ -2082,22 +2102,18 @@ def remove_network_namespace(namespace):
     run(['ip', 'netns', 'del', namespace])
 
 
-def remove_file_if_exists(filename):
-    if os.path.exists(filename):
-        os.remove(filename)
-        log_verbose('Removed %s' % filename)
-
-
 def down_command(args):
     become_root()
 
     if not args.partial:
         run(['systemctl', 'mask', 'vad.move@.service'])
 
-    state = state_load(args.config, auto_save=True)
+    state = state_load(auto_save=True)
+
+    circuit = state.get_circuit(namespace_source=args.namespace_source, namespace_target=args.namespace_target)
 
     if not args.partial and args.namespace_source == NAMESPACE_PHYSICAL:
-        run_commands('pre down', state.pre_down)
+        run_commands('pre down', circuit.pre_down)
 
     namespaces = [args.namespace_target]
     namespaces.extend([os.path.basename(f) for f in glob.glob(f'/var/run/netns/{NAME}-*')])
@@ -2119,10 +2135,10 @@ def down_command(args):
             remove_network_namespace(namespace)
 
     if not args.partial and args.namespace_source == NAMESPACE_PHYSICAL:
-        run_commands('post down', state.post_down)
+        run_commands('post down', circuit.post_down)
 
     log_verbose("Reset hop configuration")
-    state.hops = []
+    circuit.hops = []
 
     if args.partial:
         log_success("VPN is succefully down (partial)")
@@ -2680,6 +2696,12 @@ def install_command(_: Args):
     log_success("Successfully installed udev rule, services and timers!")
 
 
+def remove_file_if_exists(filename):
+    if os.path.exists(filename):
+        os.remove(filename)
+        log_verbose('Removed %s' % filename)
+
+
 def uninstall_command(_: Args):
     become_root()
 
@@ -2756,7 +2778,7 @@ def move_command(args):
 def rotate_command(args: Args, parser_up: ArgumentParser):
     become_root()
 
-    state = state_load(args.config, auto_save=True)
+    state = state_load(auto_save=True)
 
     with Mullvad().authenticate(get_account_number(state, args.passname), state.provider.mullvad.access_token) as mullvad:
         state.provider.mullvad.access_token = mullvad.access_token
@@ -2777,20 +2799,22 @@ def rotate_command(args: Args, parser_up: ArgumentParser):
 
     log_success("Successfully rotated WireGuard keys of all mapped peers")
 
-    if is_active(state):
-        args = Args(**vars(parser_up.parse_args(state.up_command)), config=args.config)
-        up_command(args, parser_up)
+    for circuit in state.circuits.values():
+        if circuit.is_active():
+            args = Args(**vars(parser_up.parse_args(circuit.up_command)))
+            up_command(args, parser_up)
 
 
 def reset_command(args: Args):
     become_root()
 
-    state = state_load(args.config, auto_save=True)
+    state = state_load(auto_save=True)
 
     uninstall_command(Args())
     delete_command(Args(config=args.config, all=True, INDEX=None, passname=args.passname))
-    # TODO: what to do with source and target namespace?
-    down_command(Args(config=args.config, namespace_target=NAMESPACE_ROOT, namespace_source=NAMESPACE_PHYSICAL, partial=False))
+
+    for circuit in state.circuits.values():
+        down_command(Args(config=args.config, namespace_target=circuit.namespace_target, namespace_source=circuit.namespace_source, partial=False))
 
     state.provider.mullvad.account_number = None
     state.provider.mullvad.access_token = None
@@ -2821,12 +2845,12 @@ def check_special_country_codes_not_in_use(relays: List[Relay]):
             log_warn("Attention, the special country code 'ec' used by this program is in use by a relay. This makes this relay unselectable! (%s)" % str(relay))
 
 
-def update_command(args: Args):
+def update_command(_: Args):
     become_root()
 
     os.makedirs('/etc/vad', exist_ok=True)
 
-    state = state_load(args.config)
+    state = state_load()
 
     providers = set(['mullvad'])
     for peer in state.peers:
@@ -3182,7 +3206,8 @@ def vad():
     exec.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to execute in the specified namespace with or without arguments.')
     exec.set_defaults(func=exec_command)
 
-    show = subparsers.add_parser('show', aliases=['s'], help='Show vpn status information, return 0 if active otherwise 1.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    show = subparsers.add_parser('show', aliases=['s'], help='Show vpn status information and active circuits, return 0 if at least one circuit is active, otherwise 1.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    show.add_argument('-i', '--wireguard-interfaces', action='store_true', help=f'Show all WireGuard interfaces per circuit', default=False)
     show.set_defaults(func=show_command)
 
     list = subparsers.add_parser('list', aliases=['l'], help='List, filter and group relays.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)

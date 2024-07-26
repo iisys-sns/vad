@@ -255,7 +255,9 @@ $ # vad down
   It will hopefully prevent picking the same (virtual/overlay) autonomous system (AS) for each hop.
   We use the term AS a bit loosely here.
   We basically want to prevent that two hops are under the control of one entity.
-  This is not that useful at the moment because Mullvad is the only supported provider and is its own overlay AS.
+  This is not very useful at the moment as Mullvad is the only supported provider and is a separate overlay AS.
+  Picking different AS's for differnt hops is not enough! The network paths from client to entry and exit to destination should not have any overlapping AS's.
+  But then the tunnel must be restricted to the destination, maybe with a socks proxy.
 * It would be possible not to break TCP connections if two conditions are met.
   First, you need a static ip address for the exit hop, that is already possible, you can just set a hostname as last hop.
   Second, the WireGuard interface `mullvad0` in the root namespace must not be deleted with an partial down and up; and the ip address must remain the same.
