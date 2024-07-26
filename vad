@@ -1706,6 +1706,12 @@ def get_dns_from_args(args):
 
 def create_network_namespace(namespace_new: str):
     log_verbose(f"Create namespace %s" % namespace_new)
+
+    run(["mkdir", "-p", "/etc/netns/%s" % namespace_new])
+    # NOTE: This instructs NetworkManager not to manage /etc/resolv.conf!
+    #       As long as "rc-manager=symlink", which should be standard.
+    run(["ln", "-sf", "/var/run/NetworkManager/resolv.conf", "/etc/netns/%s/resolv.conf" % namespace_new])
+
     run_or_fail(["ip", "netns", "add", namespace_new])
     run_or_fail(["ip", "-n", namespace_new, "link", "set", "lo", "up"])
     # NOTE: allow "ping" command for all user groups in the physical namespace
@@ -1898,11 +1904,6 @@ def physical_namespace_set_up():
         return True
 
     create_network_namespace(NAMESPACE_PHYSICAL)
-
-    run(["mkdir", "-p", "/etc/netns/physical"])
-    # NOTE: This instructes NetworkManager not to manage /etc/resolv.conf!
-    #       As long as "rc-manager=symlink", which should be standard.
-    run(["ln", "-sf", "/var/run/NetworkManager/resolv.conf", "/etc/netns/physical/resolv.conf"])
 
     for device in get_network_devices():
         if device.kind != DeviceKind.Virtual:
