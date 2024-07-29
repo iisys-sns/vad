@@ -239,6 +239,8 @@ $ # vad down
 
 ## TODOs
 
+* [ ] Add type hinting for command line arguments.
+* [ ] Bundling of all functions in a platform class that use the operating system or the environment.
 * [ ] Support adding external peers with `vad add`
 * [ ] Add `--static-exit` to up command. It will remember the exit after an up and use until down.
 * [ ] Integration testing with Vagrant
@@ -255,12 +257,12 @@ $ # vad down
   It will hopefully prevent picking the same (virtual/overlay) autonomous system (AS) for each hop.
   We use the term AS a bit loosely here.
   We basically want to prevent that two hops are under the control of one entity.
-  This is not very useful at the moment as Mullvad is the only supported provider and is a separate overlay AS.
+  This is not very useful, because Mullvad is the only supported provider.
   Picking different AS's for differnt hops is not enough! The network paths from client to entry and exit to destination should not have any overlapping AS's.
   But then the tunnel must be restricted to the destination, maybe with a socks proxy.
 * It would be possible not to break TCP connections if two conditions are met.
   First, you need a static ip address for the exit hop, that is already possible, you can just set a hostname as last hop.
-  Second, the WireGuard interface `mullvad0` in the root namespace must not be deleted with an partial down and up; and the ip address must remain the same.
+  Second, the WireGuard interface `vad0` in the root namespace must not be deleted with an partial down and up; and the ip address must remain the same.
   The latter will possibly work with `wg syncconf`.
 * Only delete namespaces/interfaces and change the configuration with a partial down and up if necessary.
 
