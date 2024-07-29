@@ -1057,12 +1057,13 @@ def print_command(process, print_output: bool = True):
             output = process.stdout
         else:
             output = process.stdout.read()
+
         if len(output) > 0:
-            lines = str(process.stdout, 'utf8')
-            lines = lines.split('\n')
-            output = '\n  '.join(lines)
-            output = output.strip()
-            print('  ' + output)
+            stdout = str(output, 'utf8')
+            lines = stdout.split('\n')
+            output_converted = '\n  '.join(lines)
+            output_converted = output_converted.strip()
+            print('  ' + str(output_converted))
 
 
 def to_base64(data: bytes) -> str:
@@ -1575,8 +1576,8 @@ def info_command(args: Args):
                     )
                 )
 
-            for peer in state.peers:
-                peer_mullvad = get_this_peer(peer, mullvad)
+            for state_peer in state.peers:
+                peer_mullvad = get_this_peer(state_peer, mullvad)
                 if peer_mullvad is not None:
                     mapped_peers.append(
                         InfoPeer(
@@ -2853,10 +2854,10 @@ def update_command(_: Args):
 
     state = state_load()
 
-    providers = set(['mullvad'])
+    set_providers = set(['mullvad'])
     for peer in state.peers:
-        providers.add(peer.provider)
-    providers = list(providers)
+        set_providers.add(peer.provider)
+    providers = list(set_providers)
 
     for provider in providers:
         if provider == 'mullvad':
