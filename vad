@@ -38,13 +38,14 @@ from prettytable import PrettyTable, ALL, FRAME
 from tempfile import NamedTemporaryFile
 
 from io import StringIO
+from io import TextIOWrapper
 from contextlib import redirect_stdout
 from functools import partial
 from dataclasses import dataclass
 from dataclasses import is_dataclass
 from dataclasses import field
 from types import UnionType, NoneType
-from typing import Tuple, TypeVar, Type, Set, Dict, Any, List, Optional, Union, NoReturn, Deque, Iterable, get_type_hints, get_args, get_origin
+from typing import Tuple, TypeVar, Type, Set, Dict, DefaultDict, Any, List, Optional, Union, NoReturn, Deque, Iterable, get_type_hints, get_args, get_origin
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -52,15 +53,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from noise.connection import NoiseConnection, Keypair
 
 
-VERBOSE = False
-
-
 PREFIX = '/etc'
 NAME = 'vad'
 RUN_DIR = f'/var/run/{NAME}'
 CIRCUIT_CONFIGURATION_DIR = f'/etc/{NAME}'
 LOCK_FILE = f'{RUN_DIR}/lock'
-LOCK_FD = None
 DEVICE_NAME_HOP = f'{NAME}%d'
 STATE = f'{RUN_DIR}/state'
 PROVIDER_DIR = f'{PREFIX}/{NAME}'
@@ -536,6 +533,7 @@ def from_dict(base: Type[T], data: Optional[Dict[str, str]]) -> T:
 @dataclass
 class Peer(Base):
     dns: Optional[str]
+    created: datetime
     ipv4: str
     ipv6: str
     private_key: str
@@ -731,6 +729,14 @@ class State(Base):
         if not key in self.circuits:
             self.circuits[key] = Circuit(namespace_source=namespace_source, namespace_target=namespace_target)
         return self.circuits[key]
+
+
+@dataclass
+class StateGlobal(Base):
+    already_locked: bool = False
+    lock_fd: Optional[TextIOWrapper] = None
+    verbose: bool = False
+    state: Optional[State] = None
 
 
 class MullvadError(Exception):
@@ -991,28 +997,25 @@ def get_socket_proxy_client6(proxy_address, port=0):
     return UDPSocket(sock, proxy_address)
 
 
-ALREADY_LOCKED = False
-
+GLOBAL = StateGlobal()
 
 def lock():
-    global ALREADY_LOCKED
-    global LOCK_FD
-    if ALREADY_LOCKED:
+    if GLOBAL.already_locked:
         return
     os.makedirs(RUN_DIR, exist_ok=True)
     fd = open(LOCK_FILE, 'a')
     fcntl.lockf(fd, fcntl.LOCK_EX)
     fd.write('%s\n' % os.getpid())
     fd.flush()
-    LOCK_FD = fd
-    ALREADY_LOCKED = True
+    GLOBAL.lock_fd = fd
+    GLOBAL.already_locked = True
     atexit.register(unlock)
 
 
 def unlock():
-    if LOCK_FD is None:
+    if GLOBAL.lock_fd is None:
         return
-    fd = LOCK_FD
+    fd = GLOBAL.lock_fd
     sys.stdout.flush()
     fcntl.lockf(fd, fcntl.LOCK_UN)
     fd.truncate(0)
@@ -1033,7 +1036,7 @@ def become_root(do_lock=True):
 
 
 def log_verbose(text, **kwargs):
-    if VERBOSE:
+    if GLOBAL.verbose:
         print(colored(text, 'cyan'), **kwargs)
 
 
@@ -1082,7 +1085,7 @@ def print_command(process, print_output: bool = True):
         if isinstance(process.stdout, bytes):
             output = process.stdout
         else:
-            output = process.stdout.read()
+            output = b''
 
         if len(output) > 0:
             stdout = str(output, 'utf8')
@@ -1132,7 +1135,7 @@ def run(args, failure_ok=False, print_output=True, as_user=False, in_namespace=N
     if in_namespace != NAMESPACE_ROOT:
         args = ["ip", "netns", "exec", in_namespace] + args
 
-    if VERBOSE:
+    if GLOBAL.verbose:
         command = subprocess.list2cmdline(args)
         command = command.replace('\n','\\n')
         if sys.stdout.isatty() and sys.stderr.isatty():
@@ -1140,7 +1143,7 @@ def run(args, failure_ok=False, print_output=True, as_user=False, in_namespace=N
 
     process = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kwargs)
 
-    if VERBOSE:
+    if GLOBAL.verbose:
         print_command(process, print_output=print_output, **kwargs)
     elif not failure_ok and process.returncode != 0:
         print_command(process, print_output=print_output, **kwargs)
@@ -1173,7 +1176,6 @@ def device_move_to_physical(device: Device):
     log_verbose("Move device '%s' into %s namespace:" % (device.name, NAMESPACE_PHYSICAL))
 
     run_or_fail(["ip", "link", "set", device.name, "down"])
-    run_or_fail(["resolvconf", "-f", "-d", '%s.*' % device.name])
 
     if device.kind == DeviceKind.Ethernet:
         run_or_fail(["ip", "link", "set", device.name, "netns", NAMESPACE_PHYSICAL])
@@ -1208,9 +1210,9 @@ def wireguard_device_setup(namespace: str, device_name: str, ipv4: Optional[str]
         mtu
     ))
 
-    if ipv4 is not None:
+    if ipv4 is not None and ipv4 != '':
         run_in_namespace_or_fail(namespace, ["ip", "addr", "add", ipv4, "dev", device_name])
-    if ipv6 is not None:
+    if ipv6 is not None and ipv6 != '':
         run_in_namespace_or_fail(namespace, ["ip", "addr", "add", ipv6, "dev", device_name])
     run_in_namespace_or_fail(namespace, ["ip", "link", "set", device_name, "up"])
     run_in_namespace_or_fail(namespace, ["ip", "link", "set", device_name, "mtu", str(mtu)])
@@ -1228,15 +1230,12 @@ def wireguard_add_peer(namespace:str, device_name:str, public_key:str, endpoint:
     run_in_namespace_or_fail(namespace, command)
 
 
-def update_resolvconf(dns, device_name: str):
-    log_verbose('Update `resolvconf` with nameserver %s:' % dns)
-    with subprocess.Popen(['resolvconf', '-a', '%s.vad' % device_name], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
-        if process.stdin is not None:
-            process.stdin.write(bytes('nameserver %s\n' % dns, 'utf8'))
-            process.stdin.close()
-        if VERBOSE:
-            print_command(process)
-    run(['resolvconf', '-u'])
+def write_resolvconf(filename: str, dns: str):
+    log_verbose('Update "%s" with nameserver %s:' % (filename, dns))
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with open(filename, 'w') as resolvconf:
+        resolvconf.write('nameserver %s\n' % dns)
+    os.chmod(filename, 0o644)
 
 
 def get_dns_server_from_flags(flags):
@@ -1451,10 +1450,59 @@ def add_command(args: Args):
 
     state = state_load(auto_save=True)
 
-    if args.provider not in SUPPORTED_PROVIDERS:
+    if args.static is None and args.provider not in SUPPORTED_PROVIDERS:
         log_fatal('Provider %s is not supported!' % args.provider)
 
-    if args.provider == 'mullvad':
+    peers_by_private_key = {}
+    for peer in state.peers:
+        peers_by_private_key[peer.private_key] = peer
+
+    if args.static is not None:
+        print(args)
+        dns, ipv4, ipv6, private_key_filename = args.static
+        if not os.path.exists(private_key_filename):
+            log_fatal('Key filename "%s" does not exists!' % private_key_filename)
+
+        with open(private_key_filename, 'r') as f:
+            private_key = f.read().strip()
+            if len(private_key) != 44:
+                log_fatal('Not valid private key, too long or too short, should be 44 but is %d!' % len(private_key))
+
+            try:
+                assert len(base64.b64decode(private_key)) == 32
+            except:
+                log_fatal('Not valid base64 encoded private key!')
+
+            if private_key in peers_by_private_key:
+                log_fatal('Peer with this private key already exists!')
+
+        try:
+            ipaddress.ip_address(dns)
+        except:
+            log_fatal('Not a valid DNS address: %s' % dns)
+
+        try:
+            ipv4 = ipaddress.IPv4Network(ipv4)
+            ipv4 = str(ipv4)
+        except:
+            log_fatal('Not a valid IPv4 address: %s' % ipv4)
+
+        if ipv6 != '':
+            try:
+                ipv6 = ipaddress.IPv6Network(ipv6)
+                ipv6 = str(ipv6)
+            except:
+                log_fatal('Not a valid IPv6 address: %s' % ipv6)
+
+        state.peers.append(Peer(
+            created=datetime.now(),
+            dns=dns,
+            private_key=private_key,
+            ipv4=ipv4,
+            ipv6=ipv6,
+            provider=args.provider[0],
+        ))
+    elif args.provider == 'mullvad':
         account_number = get_account_number(state, args.passname)
 
         with Mullvad().authenticate(account_number, state.provider.mullvad.access_token) as mullvad:
@@ -1472,17 +1520,18 @@ def add_command(args: Args):
                 private_key = generate_private_key()
                 public_key = get_public_key(private_key)
 
-                peer: MullvadPeer = mullvad.peer_create(public_key)
+                mullvad_peer: MullvadPeer = mullvad.peer_create(public_key)
 
                 state.peers.append(Peer(
                     dns=None,
+                    created=mullvad_peer.created,
                     private_key=private_key,
-                    ipv4=peer.ipv4_address,
-                    ipv6=peer.ipv6_address,
+                    ipv4=mullvad_peer.ipv4_address,
+                    ipv6=mullvad_peer.ipv6_address,
                     provider='mullvad',
                 ))
 
-                log_info('New peer added: %s' % peer.pubkey)
+                log_info('New peer added: %s' % mullvad_peer.pubkey)
 
 
 def delete_command(args):
@@ -1517,9 +1566,8 @@ def delete_command(args):
                 state.provider.mullvad.access_token = mullvad.access_token
                 public_key = get_public_key(peer.private_key)
                 mullvad.peer_remove(public_key)
-                log_info("Deleted peer %s!" % (public_key))
                 state.peers.remove(peer)
-
+                log_info("Deleted peer %s!" % (public_key))
 
     for public_key in public_keys:
         is_public_key_unknown = True
@@ -1535,7 +1583,11 @@ def delete_command(args):
 
         if is_public_key_unknown:
             log_warn('Peer with public key %s does not exists for any provider!' % public_key)
-            return
+
+        for peer in state.peers:
+            if get_public_key(peer.private_key) == public_key:
+                state.peers.remove(peer)
+                log_info("Deleted peer %s!" % (public_key))
 
 
 def generate_private_key() -> str:
@@ -1558,96 +1610,90 @@ def get_public_key(private_key: str) -> str:
     return str(output, 'utf8').strip()
 
 
-def get_this_peer(peer: Peer, mullvad: MullvadAuth) -> Optional[MullvadPeer]:
-    public_key = get_public_key(peer.private_key)
-    return mullvad.peer_by_public_key(public_key)
-
-
 @dataclass
 class InfoPeer(Base):
-    id: str
+    idx: str
     name: str
     public_key: str
     created: datetime
     ipv4: str
     ipv6: str
     provider: str
+    mapped: bool
 
 
 def info_command(args: Args):
     become_root()
 
-    state = state_load(auto_save=True)
+    state = state_load()
 
-    peers: List[InfoPeer] = []
-    mapped_peers: List[InfoPeer] = []
+    peers: Dict[str, InfoPeer] = {}
+    provider_count: DefaultDict[str, int] = defaultdict(int)
+    for idx, state_peer in enumerate(state.peers):
+        info_peer = InfoPeer(
+            idx=str(idx),
+            name='',
+            public_key=get_public_key(state_peer.private_key),
+            created=state_peer.created,
+            ipv4=state_peer.ipv4,
+            ipv6=state_peer.ipv6,
+            provider=state_peer.provider,
+            mapped=True,
+        )
+        provider_count[state_peer.provider] += 1
+        peers[info_peer.public_key] = info_peer
 
     for provider in state.provider.get_active_provider():
-        account_number = get_account_number(state, args.passname)
+        if provider == 'mullvad':
+            account_number = get_account_number(state, args.passname)
+            with Mullvad().authenticate(account_number, state.provider.mullvad.access_token) as mullvad:
+                state.provider.mullvad.access_token = mullvad.access_token
 
-        with Mullvad().authenticate(account_number, state.provider.mullvad.access_token) as mullvad:
-            state.provider.mullvad.access_token = mullvad.access_token
-
-            for peer_mullvad in mullvad.peers():
-                peers.append(
-                    InfoPeer(
-                        id=peer_mullvad.id,
-                        name=peer_mullvad.name,
-                        public_key=peer_mullvad.pubkey,
-                        created=peer_mullvad.created,
-                        ipv4=peer_mullvad.ipv4_address,
-                        ipv6=peer_mullvad.ipv6_address,
-                        provider=provider,
-                    )
-                )
-
-            for state_peer in state.peers:
-                peer_mullvad = get_this_peer(state_peer, mullvad)
-                if peer_mullvad is not None:
-                    mapped_peers.append(
-                        InfoPeer(
-                            id=peer_mullvad.id,
+                for peer_mullvad in mullvad.peers():
+                    if not peer_mullvad.pubkey in peers:
+                        info_peer = InfoPeer(
+                            idx='',
                             name=peer_mullvad.name,
                             public_key=peer_mullvad.pubkey,
                             created=peer_mullvad.created,
                             ipv4=peer_mullvad.ipv4_address,
                             ipv6=peer_mullvad.ipv6_address,
                             provider=provider,
+                            mapped=True,
                         )
-                    )
+                        peers[info_peer.public_key] = info_peer
+                    else:
+                        peers[peer_mullvad.pubkey].name = peer_mullvad.name
 
-            account: MullvadAccount = mullvad.account()
+                account = mullvad.account()
 
-            print()
-            print(colored('Mullvad:', 'white', attrs=['bold']))
-            print('--------')
-            print('Account number: ', end='')
-            if args.show_account_number:
-                print('(%s)' % account_number)
-            else:
-                print('*' * 16)
+                print()
+                print(colored('Mullvad:', 'white', attrs=['underline','bold']))
+                print()
+                print('Account number: ', end='')
+                if args.show_account_number:
+                    print('(%s)' % account_number)
+                else:
+                    print('*' * 16)
 
-            delta = account.expiry - datetime.now()
-            if account.is_active():
-                print('Expires:', end=' ')
-                log_good(str(account.expiry), end=' ')
-                print('(in %d days)' % delta.days)
-            else:
-                print('Expired:', end=' ')
-                log_bad(str(account.expiry), end=' ')
-                print('(since %d days)' % (-1*delta.days))
+                delta = account.expiry - datetime.now()
+                if account.is_active():
+                    print('Expires:', end=' ')
+                    log_good(str(account.expiry), end=' ')
+                    print('(in %d days)' % delta.days)
+                else:
+                    print('Expired:', end=' ')
+                    log_bad(str(account.expiry), end=' ')
+                    print('(since %d days)' % (-1*delta.days))
 
-            print('Peers: ', end='')
-            peers_text = '%s/%s' % (len(peers), account.max_peers())
-            if account.can_add_peers():
-                log_good(peers_text)
-            else:
-                log_warn(peers_text)
+                print('Peers: ', end='')
+                peers_text = '%s/%s' % (provider_count[provider], account.max_peers())
+                if account.can_add_peers():
+                    log_good(peers_text)
+                else:
+                    log_warn(peers_text)
 
     fields = ['Index', 'Provider', 'Created']
-
-    if args.show_peer_ids:
-        fields.append('ID')
 
     fields.extend(['Name', 'IPv4'])
 
@@ -1661,19 +1707,15 @@ def info_command(args: Args):
     table.align['Name'] = 'l'
     table.align['IPv4'] = 'r'
     table.align['IPv6'] = 'r'
-    for peer in peers:
-        if peer in mapped_peers:
-            idx = str(mapped_peers.index(peer))
-        else:
-            idx = ''
+    for peer in sorted(peers.values(), key=lambda p: p.created):
         table.add_row(
-            [idx, peer.provider, peer.created] +
-            ([peer.id] if args.show_peer_ids else []) +
-            [peer.name.title(), peer.ipv4] +
+            [peer.idx, peer.provider, peer.created.strftime('%Y-%m-%d %H:%M:%S'), peer.name.title(), peer.ipv4] +
             ([peer.ipv6] if args.show_ipv6 else []) +
             [peer.public_key]
         )
 
+    print()
+    print(colored('All peers (mapped peers have an index):', 'white', attrs=['underline']))
     print()
     print(table)
 
@@ -1734,11 +1776,6 @@ def create_network_namespace(namespace_new: str):
         return
 
     log_verbose(f"Create namespace %s" % namespace_new)
-
-    run(["mkdir", "-p", "/etc/netns/%s" % namespace_new])
-    # NOTE: This instructs NetworkManager not to manage /etc/resolv.conf!
-    #       As long as "rc-manager=symlink", which should be standard.
-    run(["ln", "-sf", "/var/run/NetworkManager/resolv.conf", "/etc/netns/%s/resolv.conf" % namespace_new])
 
     run_or_fail(["ip", "netns", "add", namespace_new])
     run_or_fail(["ip", "-n", namespace_new, "link", "set", "lo", "up"])
@@ -1927,17 +1964,6 @@ def create_hop_table(hops: List[Hop | MultiHop]):
     return table
 
 
-def physical_namespace_set_up():
-    if network_namespace_exists(NAMESPACE_PHYSICAL):
-        return
-
-    create_network_namespace(NAMESPACE_PHYSICAL)
-
-    for device in get_network_devices():
-        if device.kind != DeviceKind.Virtual:
-            device_move_to_physical(device)
-
-
 def up_command(args: Args, parser_up: ArgumentParser):
     become_root()
 
@@ -2015,12 +2041,12 @@ def up_command(args: Args, parser_up: ArgumentParser):
 
     hops = path_configure_hops(available_peers, path_relays, args.without_multihop)
 
-    if hops[-1].provider() == 'mullvad':
-        dns_server = hops[-1].peer.dns = get_dns_from_args(args)
-    else:
-        dns_server = hops[-1].peer.dns
-        if dns_server is None:
-            log_fatal("Peer %s has no DNS server, please specify one!" % get_public_key(hops[-1].peer.private_key))
+    for hop in hops:
+        if hop.provider() == 'mullvad':
+            hop.peer.dns = get_dns_from_args(args)
+        else:
+            if hop.peer.dns is None:
+                log_fatal("Peer %s has no DNS server, please specify one!" % get_public_key(hops[-1].peer.private_key))
 
     table_hops = create_hop_table(hops)
 
@@ -2035,22 +2061,28 @@ def up_command(args: Args, parser_up: ArgumentParser):
     source_already_existed = network_namespace_exists(args.namespace_source)
 
     if args.namespace_source == NAMESPACE_PHYSICAL:
-        physical_namespace_set_up()
+        if not network_namespace_exists(NAMESPACE_PHYSICAL):
+            create_network_namespace(NAMESPACE_PHYSICAL)
+            for device in get_network_devices():
+                if device.kind != DeviceKind.Virtual:
+                    device_move_to_physical(device)
+        run(["mkdir", "-p", "/etc/netns/%s" % NAMESPACE_PHYSICAL])
+        # NOTE: This instructs NetworkManager not to manage /etc/resolv.conf!
+        #       As long as "rc-manager=symlink".
+        run(["ln", "-sf", "/var/run/NetworkManager/resolv.conf", "/etc/netns/%s/resolv.conf" % NAMESPACE_PHYSICAL])
     elif not network_namespace_exists(args.namespace_source):
         create_network_namespace(args.namespace_source)
+
+    if not network_namespace_exists(args.namespace_target):
+        create_network_namespace(args.namespace_target)
 
     if not source_already_existed:
         run_commands('pre up', circuit.pre_up)
 
-    if args.namespace_target != NAMESPACE_ROOT:
-        if not network_namespace_exists(args.namespace_target):
-            create_network_namespace(args.namespace_target)
-
     print(table_hops)
 
-    circuit.hops = []
-    for hop in hops:
-        circuit.hops.append(hop)
+    circuit.hops.clear()
+    circuit.hops.extend(hops)
 
     namespaces = []
     namespaces.append(args.namespace_source)
@@ -2059,10 +2091,15 @@ def up_command(args: Args, parser_up: ArgumentParser):
         circuit.other_namespaces.append(namespace)
         namespaces.insert(1, namespace)
         create_network_namespace(namespace)
+        hop = hops[len(hops) - idx - 1]
+        if hop.peer.dns is not None:
+            write_resolvconf('/etc/netns/%s/resolv.conf' % namespace, hop.peer.dns)
     namespaces.append(args.namespace_target)
 
     base_device_id = state.last_device_id
 
+    # TODO: namespace should be an attribute of Hop | MultiHop
+    # TODO: device_name should be an attribute of Hop | MultiHop
     mtu = 1420
     for idx in range(len(hops)):
         hop = hops[idx]
@@ -2071,7 +2108,6 @@ def up_command(args: Args, parser_up: ArgumentParser):
 
         device_idx = base_device_id + (len(hops) - idx - 1)
         device_name = DEVICE_NAME_HOP % device_idx
-        log_verbose(device_name)
 
         state.last_device_id += 1
         circuit.devices[namespace] = device_name
@@ -2101,7 +2137,8 @@ def up_command(args: Args, parser_up: ArgumentParser):
         mtu -= 80
 
         if namespace == NAMESPACE_ROOT:
-            update_resolvconf(dns_server, device_name)
+            if hop.peer.dns is not None:
+                write_resolvconf('/etc/resolv.conf', hop.peer.dns)
 
     if not is_default and not args.dont_save:
         circuit.up_command = sys.argv[sys.argv.index('up')+1:]
@@ -2124,7 +2161,6 @@ def remove_device(namespace, device_name):
     log_verbose("Delete device %s from network namespace %s" % (device_name, namespace))
 
     if namespace == NAMESPACE_ROOT:
-        run(['resolvconf', '-d', '%s.vad' % device_name])
         run(['ip', 'link', 'del', device_name])
     else:
         run(['ip', '-n', namespace, 'link', 'del', device_name])
@@ -2152,10 +2188,14 @@ def remove_network_namespace(namespace):
                 elif type == DeviceKind.Ethernet:
                     run(['ip', 'link', 'set', device.name, 'netns', NAMESPACE_ROOT])
 
+    remove_file_if_exists('/etc/netns/%s/resolv.conf' % namespace)
+    run(['rmdir', '/etc/netns/%s' % namespace])
+
     run(['ip', 'netns', 'del', namespace])
 
 
-def down_namespace(namespace: str, device_name: Optional[str], partial: bool = True):
+
+def down_namespace(namespace: str, device_name: Optional[str], partial: bool = True, force: bool = False):
     if network_namespace_exists(namespace):
         if device_name is not None:
             remove_device(namespace, device_name)
@@ -2166,9 +2206,10 @@ def down_namespace(namespace: str, device_name: Optional[str], partial: bool = T
             for device in devices:
                 if device.name.startswith(NAME):
                     has_more_of_our_devices = True
-                    log_verbose('Namespace "%s" hast still more vad interfaces, we will not remove this namespace!' % namespace)
+                    if not force:
+                        log_warn('Namespace "%s" hast still more vad interfaces, we will not remove this namespace!' % namespace)
                     break
-        if not partial and not has_more_of_our_devices:
+        if (not partial and not has_more_of_our_devices) or force:
             remove_network_namespace(namespace)
 
 
@@ -2180,7 +2221,7 @@ def down_circuit(circuit: Circuit, partial: bool):
     down_namespace(circuit.namespace_source, circuit.devices.get(circuit.namespace_source, None), partial)
 
     for namespace in circuit.other_namespaces:
-        down_namespace(namespace, circuit.devices.get(circuit.namespace_target, None), False)
+        down_namespace(namespace, circuit.devices.get(namespace, None), False)
 
     if not partial:
         run_commands('post down', circuit.post_down)
@@ -2208,7 +2249,7 @@ def down_command(args):
         for namespace in glob.glob(f'/var/run/netns/{NAME}-*'):
             namespace = os.path.basename(namespace)
             log_warn('Remove orphaned network namespace "%s"' % namespace)
-            down_namespace(namespace, None)
+            down_namespace(namespace, None, force=True)
         if not args.partial:
             state.circuits = {}
             state.last_device_id = 0
@@ -2231,7 +2272,7 @@ def exec_command(args):
     uid = os.getenv('SUDO_UID', os.geteuid())
     gid = os.getenv('SUDO_GID', os.getegid())
     args = ["ip", "netns", "exec", args.namespace, "sudo", "-E", "-u", '#%s' % uid, "-g", '#%s' % gid, "--"] + args.CMD
-    if VERBOSE:
+    if GLOBAL.verbose:
         print(subprocess.list2cmdline(args))
     os.execvp("ip", args)
 
@@ -2873,7 +2914,7 @@ def rotate_command(args: Args, parser_up: ArgumentParser):
             peer.ipv4 = mullvad_peer.ipv4_address
             peer.ipv6 = mullvad_peer.ipv6_address
             # FIXME: Implement backoff
-            time.sleep(2)
+            time.sleep(4)
 
     log_success("Successfully rotated WireGuard keys of all mapped peers")
 
@@ -2999,7 +3040,6 @@ class TestDependencies(unittest.TestCase):
             "ip",
             "iw",
             "sysctl",
-            "resolvconf",
             # pass
         ]
 
@@ -3238,8 +3278,16 @@ def vad():
 
     add = subparsers.add_parser('add', help='Adding new peers from your account to this computer. Every new peer enables at least one hop. In a multihop configuration (https://mullvad.net/de/help/multihop-wireguard) every peer enables two hops. Normally 5 peers are possible per account, this allows a maximum of ten hops.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     add.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
-    add.add_argument('-o', '--provider', type=str, nargs='?', default='mullvad', help='Specifices the provider from which (a) peer(s) should be added')
-    add.add_argument('count', metavar='N', type=int, nargs='?', default=1, help='Number of peers to add, useful if you do not want to save your account number and want to add more than one peer.')
+    add.add_argument('-o', '--provider', type=str, nargs=1, default='mullvad', help='Specifices the provider from which (a) peer(s) should be added')
+    group = add.add_mutually_exclusive_group()
+    group.add_argument('-s', '--static',
+                     type=str,
+                     nargs=4,
+                     required=False,
+                     default=None,
+                     metavar=('DNS', 'IPV4', 'IPV6', 'PRIVATE_KEY_FILENAME'),
+                     help='Add a peer manually')
+    group.add_argument('count', metavar='N', type=int, nargs='?', default=1, help='Number of peers to add, useful if you do not want to save your account number and want to add more than one peer.')
     add.set_defaults(func=add_command)
 
     delete = subparsers.add_parser('delete', help='Delete mapped peer(s) from this computer and your account.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -3251,7 +3299,6 @@ def vad():
     info = subparsers.add_parser('info', help='View account information and highlight peers added to this computer.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     info.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     info.add_argument('-a', '--show-account-number', action='store_true', help='Shows the account number.')
-    info.add_argument('-s', '--show-peer-ids', action='store_true', help='Show peer ids.')
     info.add_argument('-6', '--show-ipv6', action='store_true', help='Show IPv6 address column of peer.')
     info.set_defaults(func=info_command)
 
@@ -3341,8 +3388,7 @@ def vad():
 
     args = parser.parse_args()
 
-    global VERBOSE
-    VERBOSE = args.verbose
+    GLOBAL.verbose = args.verbose
 
     global colored
     if args.no_color:
