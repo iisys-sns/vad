@@ -24,9 +24,9 @@ import sys
 import threading
 import time
 import unittest
+import pycountry
 import yaml
 
-from abc import ABC, abstractmethod
 from datetime import datetime
 from termcolor import colored
 from argparse import Namespace as Args
@@ -68,7 +68,10 @@ NAMESPACE_PHYSICAL = 'physical'
 EUROPE_UNION = ["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu", "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se"]
 EUROPE_CONTINENT = EUROPE_UNION + ["is", "no", "li", "ch", "uk", "gb", "me", "mk", "al", "rs", "tr", "ba", "xk", "am", "az", "by", " md", "ge", "ua"]
 PROVIDER_MULLVAD = 'mullvad'
-SUPPORTED_PROVIDERS = [PROVIDER_MULLVAD]
+PROVIDER_NORDVPN = 'nordvpn'
+PROVIDER_PROTONVPN = 'protonvpn'
+PROVIDER_SURFSHARK = 'surfshark'
+SUPPORTED_PROVIDERS = [PROVIDER_MULLVAD, PROVIDER_NORDVPN, PROVIDER_PROTONVPN, PROVIDER_SURFSHARK]
 ASN_FILENAME = f'{CONF_DIR}/asn.dat'
 ASN_NAMES_FILENAME = f'{CONF_DIR}/asnames.json'
 
@@ -756,43 +759,47 @@ class InfoPeer(Base):
     mapped: bool
 
 
-class Provider(ABC):
+class Provider:
     @staticmethod
     def by_name(name: str) -> 'Provider':
         if name == PROVIDER_MULLVAD:
             return Mullvad()
+        elif name == PROVIDER_NORDVPN:
+            return NordVPN()
+        elif name == PROVIDER_PROTONVPN:
+            return ProtonVPN()
+        elif name == PROVIDER_SURFSHARK:
+            return Surfshark()
         else:
             log_fatal("Provider '%s' is not supported!" % name)
 
-    @abstractmethod
     def init(self, state: State, passname: str, dont_save_account_number: bool) -> None:
+        _ = state, passname, dont_save_account_number
         log_fatal("Not implemented for this provider!")
 
-    @abstractmethod
     def add(self, state: State, passname: str, count: int) -> None:
+        _ = state, passname, count
         log_fatal("Not implemented for this provider!")
 
-    @abstractmethod
     def delete(self, state: State, passname: str, peer: Peer) -> None:
+        _ = state, passname, peer
         log_fatal("Not implemented for this provider!")
 
-    @abstractmethod
     def delete_by_public_key(self, state: State, passname: str, public_key: str) -> bool:
+        _ = state, passname, public_key
         log_fatal("Not implemented for this provider!")
 
-    @abstractmethod
     def info(self, state: State, passname: str, show_account_number: bool) -> List[InfoPeer]:
+        _ = state, passname, show_account_number
         log_fatal("Not implemented for this provider!")
 
-    @abstractmethod
     def show(self) -> None:
         log_fatal("Not implemented for this provider!")
 
-    @abstractmethod
     def rotate(self, state: State, passname: str, peer: Peer) -> None:
+        _ = state, passname, peer
         log_fatal("Not implemented for this provider!")
 
-    @abstractmethod
     def update(self) -> List[Relay]:
         log_fatal("Not implemented for this provider!")
 
@@ -973,6 +980,134 @@ class Mullvad(Provider):
                 gigabit_per_second = mullvad_relay.network_port_speed,
                 public_key         = mullvad_relay.pubkey,
                 multihop_port      = mullvad_relay.multihop_port,
+            ))
+
+        return relays
+
+
+class NordVPN(Provider):
+    def update(self) -> List[Relay]:
+        response = requests.get('https://api.nordvpn.com/v1/servers?limit=16384')
+        assert response.status_code == 200
+
+        relays = []
+        for relay in response.json():
+            assert 1 <= len(relay['ips']) <= 2
+            assert len(relay['locations']) == 1
+
+            wireguard_pubkey = None
+            is_wireguard = False
+            for tech in relay['technologies']:
+                if tech['identifier'] == 'wireguard_udp':
+                    is_wireguard = True
+                    assert tech['metadata'][0]['name'] == 'public_key'
+                    wireguard_pubkey = tech['metadata'][0]['value']
+
+            if not is_wireguard:
+                continue
+            if wireguard_pubkey is None:
+                continue
+
+            relays.append(Relay(
+                provider           = PROVIDER_NORDVPN,
+                hostname           = relay['hostname'],
+                country_code       = relay['locations'][0]['country']['code'].lower(),
+                country_name       = relay['locations'][0]['country']['name'],
+                city_code          = relay['locations'][0]['country']['city']['name'][0:3].lower(),
+                city_name          = relay['locations'][0]['country']['city']['name'],
+                active             = True,
+                owned              = False, # Unknown
+                asn                = '',
+                ipv4               = relay['station'],
+                ipv6               = relay['ipv6_station'],
+                gigabit_per_second = relay['load'],
+                public_key         = wireguard_pubkey,
+                multihop_port      = 0,
+            ))
+
+        return relays
+
+
+class ProtonVPN(Provider):
+    def update(self) -> List[Relay]:
+        response = requests.get('https://account.protonvpn.com/api/vpn/logicals')
+        assert response.status_code == 200
+
+        relays = []
+
+        ipaddresses = set()
+        for relay in response.json()['LogicalServers']:
+            assert len(relay['Servers']) >= 1
+
+            if relay['EntryCountry'] != relay['ExitCountry']:
+                continue
+
+            if relay['Features'] & 2 != 0:
+                continue
+
+            ipv4 = relay['Servers'][0]['EntryIP']
+            if ipv4 in ipaddresses:
+                continue
+            ipaddresses.add(ipv4)
+
+            if relay['City'] is None:
+                relay['City'] = 'Unknown'
+
+            relays.append(Relay(
+                provider           = PROVIDER_PROTONVPN,
+                hostname           = relay['Domain'],
+                country_code       = relay['EntryCountry'].lower(),
+                country_name       = '',
+                city_code          = relay['City'][0:3].lower(),
+                city_name          = relay['City'],
+                active             = True,
+                owned              = False,
+                asn                = '',
+                ipv4               = relay['Servers'][0]['EntryIP'],
+                ipv6               = '',
+                gigabit_per_second = 0,
+                public_key         = relay['Servers'][0]['X25519PublicKey'],
+                multihop_port      = 0,
+            ))
+
+        return relays
+
+
+class Surfshark(Provider):
+    def update(self) -> List[Relay]:
+        response = requests.get('https://api.surfshark.com/v3/server/clusters')
+        assert response.status_code == 200
+
+        relays = []
+
+        for relay in response.json():
+            assert relay['type'] == 'generic'
+
+            hostname = socket.gethostbyname(relay['connectionName'])
+            ipv4 = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)
+            ipv4 = ipv4[0][4][0]
+
+            try:
+                ipv6 = socket.getaddrinfo(hostname, None, socket.AF_INET6, socket.SOCK_STREAM)
+                ipv6 = ipv6[0][4][0]
+            except socket.gaierror:
+                ipv6 = ''
+
+            relays.append(Relay(
+                provider           = PROVIDER_SURFSHARK,
+                hostname           = relay['connectionName'],
+                country_code       = relay['countryCode'].lower(),
+                country_name       = relay['country'],
+                city_code          = relay['location'][0:3].lower(),
+                city_name          = relay['location'],
+                active             = True,
+                owned              = False,
+                asn                = '',
+                ipv4               = ipv4,
+                ipv6               = ipv6,
+                gigabit_per_second = relay['load'],
+                public_key         = relay['pubKey'],
+                multihop_port      = 0,
             ))
 
         return relays
@@ -1509,11 +1644,12 @@ def load_relays(providers: Optional[Iterable[str]] = None) -> List[Relay]:
         if providers is not None and provider not in providers:
             continue
         with open(provider_filename, 'r') as file:
-            if os.path.basename(provider_filename) == 'asnames.json':
+            if provider_filename == ASN_NAMES_FILENAME:
                 continue
             for relay_data in json.load(file):
                 relay = from_dict(Relay, relay_data)
-                relay.asn, _ = ASNDB.lookup(relay.ipv4)
+                asn, _ = ASNDB.lookup(relay.ipv4)
+                relay.asn = str(asn)
                 relays.append(relay)
 
     if len(relays) == 0:
@@ -1532,7 +1668,7 @@ def filter_relays(relays: List[Relay], active: Optional[bool] = None, owned: Opt
     if country_city_hostname is not None and not country_city_hostname == 'w':
         if country_city_hostname == 'eu':
             relays = list(filter(lambda relay: relay.country_code in EUROPE_UNION, relays))
-        elif country_city_hostname == 'ec':
+        elif country_city_hostname == 'uu':
             relays = list(filter(lambda relay: relay.country_code in EUROPE_CONTINENT, relays))
         elif len(country_city_hostname) == 2:
             relays = list(filter(lambda relay: relay.country_code == country_city_hostname, relays))
@@ -2432,8 +2568,14 @@ def list_command(args):
         cumsum = 0
         for (asn), count in sorted(asns.items(), key=lambda k: k[1]):
             cumsum += count
-            asn_name = ASNDB.get_as_name(asn)
-            asn_name = '%s, %s' % (asn_name.split(' ')[0].strip(', '), asn_name.split(',')[-1].strip())
+            asn_name = ASNDB.get_as_name(int(asn))
+            if asn_name is None:
+                asn_name = '???, ??'
+            else:
+                asn_name = '%s, %s' % (
+                    asn_name.split(' ')[0].strip(', '),
+                    asn_name.split(',')[-1].strip()
+                )
             table.add_row([count, '%.1f' % (count/total*100), '%.1f' % (cumsum/total*100), asn, asn_name])
         print(table)
     elif args.group_by_provider:
@@ -3047,9 +3189,9 @@ def check_unique_city_codes(relays: List[Relay]):
 def check_special_country_codes_not_in_use(relays: List[Relay]):
     for relay in relays:
         if 'eu' == relay.country_code:
-            log_warn("Attention, the special country code 'eu' used by this program is in use by a relay. This makes this relay unselectable! (%s)" % str(relay))
-        elif 'ec' == relay.country_code:
-            log_warn("Attention, the special country code 'ec' used by this program is in use by a relay. This makes this relay unselectable! (%s)" % str(relay))
+            log_warn("Attention, the special country code 'eu' used by this program is in use by a relay. This makes this relay unselectable! (%s)" % str(relay.hostname))
+        elif 'uu' == relay.country_code:
+            log_warn("Attention, the special country code 'uu' used by this program is in use by a relay. This makes this relay unselectable! (%s)" % str(relay.hostname))
 
 
 def update_command(_: Args):
@@ -3067,7 +3209,7 @@ def update_command(_: Args):
         run(['rm', f'{CONF_DIR}/rib.*.bz2'])
 
     set_providers = set(state.provider.get_active_provider())
-    set_providers.add(PROVIDER_MULLVAD)
+    set_providers.update(SUPPORTED_PROVIDERS)
 
     providers = list(set_providers)
 
@@ -3085,12 +3227,24 @@ def update_command(_: Args):
                else:
                    relay.asn = str(asn)
 
+               if relay.country_code == 'uk':
+                   relay.country_code = 'gb'
+
+               country = pycountry.countries.get(alpha_2=relay.country_code)
+
+               if country is not None:
+                   relay.country_name = country.name
+               else:
+                   log_warn('Country code "%s" is unknown!' % relay.country_code)
+
             path = os.path.join(PROVIDER_DIR, provider + '.json')
             with open(path, 'w') as file:
                 json.dump([relay.to_dict() for relay in relays], file, indent=4)
             os.chmod(path, 0o644)
             log_info('Updated %d relays for provider "%s"' % (len(relays), provider))
         except Exception as e:
+            import traceback
+            traceback.print_exception(e)
             log_warn('Can not download relays for provider "%s", because of %s' % (provider, str(e)))
 
     relays = load_relays(providers)
@@ -3391,7 +3545,7 @@ def vad():
     update.set_defaults(func=update_command)
 
     up = subparsers.add_parser('up', aliases=['u'], help=f'Set up a vpn tunnel: move all physical network devices into the physical network namespace, configure one or more Mullvad relay and setup a wireguard device in the root namespace. All programs from non root users are forced to use the wireguard device in the root namespace.')
-    up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the relay\'s hostname. The sequence determines the data flow. More hops require more devices (see `vad init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the European Union then use "eu". If you only want to use hops from countries on the European continent then use "ec". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vad up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
+    up.add_argument('COUNTRY_CITY_HOSTNAME', nargs='*', help='Select up to ten random hops by country code (e.g. de), city code (e.g. dus) or hostname (e.g. de-dus-wg-001). Filtering by hostname only works with four or more characters and must be a substring from the relay\'s hostname. The sequence determines the data flow. More hops require more devices (see `vad init`). If you want to use a random hop around the earth, then use "w" as placeholder. If you only want to use hops from countries in the European Union then use "eu". If you only want to use hops from countries on the European continent then use "uu". If no hops are specified, then a one hop tunnel with a random hop from around the earth will be built. If already active, than a second call, will tear down the configuration, except the physical namespace, so no data leaks can occur, and build a new tunnel. If you execute the up command without arguments (`vad up`) it will use the options of the last call with arguments. The last call with arguments will be saved to the configuration file, after an successful up, if you do not want this, use `-s --dont-save`.')
     up.add_argument('-s', '--dont-save', action='store_true', help='Do not save the last call with arguments to the configuration file.')
     up.add_argument('-a', '--update-relay-list', action='store_true', help='Update relay list.')
     up.add_argument('-n', '--dry-run', action='store_true', help='Show only chosen hop(s) and nameserver.')
