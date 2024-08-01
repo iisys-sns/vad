@@ -2045,7 +2045,7 @@ def path_selection(relays: List[Relay], path: List[str], owned_entry: bool, unif
 
 def path_selection_default(relays: List[Relay]) -> List[Relay]:
     # (1) Select a entry relay
-    #     (a) Select a trust worthy VPN provider uniform at random
+    #     (a) Select a VPN provider uniform at random
     #     (b) Select a relay from this provider uniform at random
     #     (c) Exclude provider from path selection
     # (2) Select a middle relay
@@ -2568,7 +2568,9 @@ def list_command(args):
         cumsum = 0
         for (asn), count in sorted(asns.items(), key=lambda k: k[1]):
             cumsum += count
-            asn_name = ASNDB.get_as_name(int(asn))
+            asn_name = None
+            if asn != 'None':
+                asn_name = ASNDB.get_as_name(int(asn))
             if asn_name is None:
                 asn_name = '???, ??'
             else:
