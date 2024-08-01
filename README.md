@@ -239,6 +239,7 @@ $ # vad down
 
 ## TODOs
 
+* [ ] Add `vad clear` to delete account releated information
 * [ ] Add type hinting for command line arguments.
 * [ ] Bundling of all functions in a platform class that use the operating system or the environment.
 * [ ] Integration testing with Vagrant
