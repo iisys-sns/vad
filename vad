@@ -3205,10 +3205,13 @@ def update_command(_: Args):
 
     if not os.path.exists(ASN_FILENAME) or not os.path.exists(ASN_NAMES_FILENAME):
         log_info('Update ASN database...')
+        cwd = os.getcwd()
+        os.chdir(CONF_DIR)
         run(['pyasn_util_asnames.py', '-o', ASN_NAMES_FILENAME])
         run(['pyasn_util_download.py', '--latestv46'])
-        run(['pyasn_util_convert.py', '--single', 'rib.*.bz2', ASN_FILENAME])
-        run(['rm', f'{CONF_DIR}/rib.*.bz2'])
+        run(['pyasn_util_convert.py', '--single', *glob.glob(os.path.join(CONF_DIR, 'rib.*.bz2')), ASN_FILENAME])
+        run(['rm', *glob.glob(os.path.join(CONF_DIR, 'rib.*.bz2'))])
+        os.chdir(cwd)
 
     set_providers = set(state.provider.get_active_provider())
     set_providers.update(SUPPORTED_PROVIDERS)
