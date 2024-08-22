@@ -150,6 +150,7 @@ class OnionVpnUrl:
 
 
 MS_RDONLY = 1
+MS_BIND = 4096
 MS_REC = 16384
 MS_SLAVE = 1 << 19
 MNT_DETACH = 2
@@ -173,6 +174,7 @@ def mount(source: str, target: str, fstype: str, flags: int, data: str):
 
 def umount2(target: str, flags: int):
     return LIBC.umount2(target.encode(), flags)
+
 
 class NetworkNamespace:
     """
@@ -221,10 +223,23 @@ class NetworkNamespace:
             errmsg = os.strerror(ctypes.get_errno())
             log_fatal("mount of /sys failed: %s" % (errmsg))
 
+        # bind etc
+        for netns_name in glob.glob(f'/etc/netns/{self.namespace_name}/*'):
+            etc_name = os.path.join('/etc', os.path.basename(netns_name))
+            if mount(netns_name, etc_name, "one", MS_BIND, "") < 0:
+                errmsg = os.strerror(ctypes.get_errno())
+                log_fatal("Bind %s -> %s failed: %s" % (netns_name, etc_name, errmsg))
+
     def __exit__(self, *_):
         if self.namespace_name == NAMESPACE_ROOT:
             return
 
+        # unbind etc
+        for netns_name in glob.glob(f'/etc/netns/{self.namespace_name}/*'):
+            etc_name = os.path.join('/etc', os.path.basename(netns_name))
+            if umount2(etc_name, 0) < 0:
+                errmsg = os.strerror(ctypes.get_errno())
+                log_fatal("Unbind %s failed: %s" % (etc_name, errmsg))
         if umount2("/sys", 0) < 0:
             errmsg = os.strerror(ctypes.get_errno())
             log_fatal("Failed to unmount sysfs: %s" % (errmsg))
@@ -2507,10 +2522,10 @@ def exec_command(args):
 
     uid = os.getenv('SUDO_UID', os.geteuid())
     gid = os.getenv('SUDO_GID', os.getegid())
-    args = ["ip", "netns", "exec", args.namespace, "sudo", "-E", "-u", '#%s' % uid, "-g", '#%s' % gid, "--"] + args.CMD
+    command = ["ip", "netns", "exec", args.namespace, "sudo", "-E", "-u", '#%s' % uid, "-g", '#%s' % gid, "--"] + args.CMD
     if GLOBAL.verbose:
-        print(subprocess.list2cmdline(args))
-    os.execvp("ip", args)
+        print(subprocess.list2cmdline(command))
+    os.execvp("ip", command)
 
 
 def list_command(args):
