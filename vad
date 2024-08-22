@@ -61,7 +61,7 @@ RUN_DIR = f'/var/run/{NAME}'
 CONF_DIR = f'/etc/{NAME}'
 LOCK_FILE = f'{RUN_DIR}/lock'
 DEVICE_NAME_HOP = f'{NAME}%d'
-STATE = f'{RUN_DIR}/state'
+STATE = f'/var/lib/vad/state'
 PROVIDER_DIR = f'{PREFIX}/{NAME}'
 NAMESPACE_ROOT = '1'
 NAMESPACE_PHYSICAL = 'physical'
@@ -714,6 +714,7 @@ class State(Base):
             return from_dict(State, data)
 
     def save(self, filename: str = STATE):
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
         with open(filename, 'w') as s:
             os.chmod(filename, 0o600)
             yaml.dump(self.to_dict(), s)
@@ -1605,7 +1606,7 @@ def wireguard_add_peer(namespace:str, device_name:str, public_key:str, endpoint:
 
 
 def write_resolvconf(filename: str, dns: str):
-    log_verbose('Update "%s" with nameserver %s:' % (filename, dns))
+    log_verbose('Update "%s" with nameserver %s' % (filename, dns))
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, 'w') as resolvconf:
         resolvconf.write('nameserver %s\n' % dns)
@@ -1722,7 +1723,7 @@ def init_command(args: Args):
 
     os.makedirs(CONF_DIR, exist_ok=True)
 
-    default_circuit_configuration = '1-physical'
+    default_circuit_configuration = os.path.join(CONF_DIR, '1-physical.yaml')
 
     no_configuration_file_exists = not os.path.exists(default_circuit_configuration)
 
@@ -2371,6 +2372,9 @@ def up_command(args: Args, parser_up: ArgumentParser):
         if namespace == NAMESPACE_ROOT:
             if hop.peer.dns is not None:
                 write_resolvconf('/etc/resolv.conf', hop.peer.dns)
+        else:
+            if hop.peer.dns is not None:
+                write_resolvconf('/etc/netns/%s/resolv.conf' % namespace, hop.peer.dns)
 
     if not is_default and not args.dont_save:
         circuit.up_command = sys.argv[sys.argv.index('up')+1:]
