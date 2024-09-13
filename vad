@@ -3624,15 +3624,15 @@ def vad():
     list.add_argument('-i', '--inactive', dest='active', action='store_false', help='Filter by inactive relays.', default=None)
     list.set_defaults(func=list_command)
 
-    proxy = subparsers.add_parser('proxy', help='Start a proxy that will help an onion vpn service to connect to a client')
+    proxy = subparsers.add_parser('proxy', help='HIGHLY EXPERIMENTAL: Start a proxy that will help an onion vpn service to connect to a client')
     proxy.set_defaults(func=proxy_command)
     proxy.add_argument('--port', nargs=1, default=6666, help=f'Port where the proxy should listen on')
 
-    start = subparsers.add_parser('start', help='Start an onion vpn service in its own network namespace')
+    start = subparsers.add_parser('start', help='HIGHLY EXPERIMENTAL: Start an onion vpn service in its own network namespace')
     start.set_defaults(func=start_command)
     start.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to start the service in the service namespace with or without arguments.')
 
-    connect = subparsers.add_parser('connect', help='Connect to an onion vpn service')
+    connect = subparsers.add_parser('connect', help='HIGHLY EXPERIMENTAL: Connect to an onion vpn service')
     connect.set_defaults(func=connect_command)
     connect.add_argument('URL', nargs=1, help=f'URL')
 
