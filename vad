@@ -3177,17 +3177,23 @@ def rotate_command(args: Args, parser_up: ArgumentParser):
     log_success("Restarted all active circuits to use the new keys")
 
 
-def reset_command(args: Args):
+def clear_command(_: Args):
     become_root()
 
     state = state_load(auto_save=True)
 
-    uninstall_command(Args())
-    delete_command(Args(all=True, INDEX=None, passname=args.passname))
-    down_command(Args(namespace_target=None, namespace_source=None, partial=False))
+    state.provider = StateProvider()
 
-    state.provider.mullvad.account_number = None
-    state.provider.mullvad.access_token = None
+    log_success("Removed account related information from %s" % STATE)
+
+
+def reset_command(args: Args):
+    become_root()
+
+    uninstall_command(Args())
+    down_command(Args(namespace_target=None, namespace_source=None, partial=False))
+    delete_command(Args(all=True, INDEX=None, passname=args.passname))
+    clear_command(Args())
 
     log_success("Successfully reseted")
 
@@ -3639,7 +3645,10 @@ def vad():
     rotate.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     rotate.set_defaults(func=rotate_command)
 
-    reset = subparsers.add_parser('reset', help='Tear down vpn, delete all mapped peers to this computer, remove services added through `vpn service` and remove account related information from configuration.')
+    clear = subparsers.add_parser('clear', help='Remove account related information from state file.')
+    clear.set_defaults(func=clear_command)
+
+    reset = subparsers.add_parser('reset', help='Delete all mapped peers, remove services added through `vad install` and remove account related information from state file.')
     reset.add_argument('-p', '--passname', nargs=1, dest='passname', help='Request account number from pass.', default='web/mullvad')
     reset.set_defaults(func=reset_command)
 
