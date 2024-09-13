@@ -1,27 +1,22 @@
 # Vad
 
 An alternative experimental command line interface (CLI) for Mullvad that is based on network namespaces, supports up to ten hops and does not need a daemon.
+NordVPN, ProtonVPN und Surfshark are only rudimentary supported.
 It aims to be very user friendly.
 It is based on [this](https://www.wireguard.com/netns#sample-script) script.
 It also supports features that make Onion Services possible, even without port-forwarding, but these are **HIGHLY EXPERIMENTAL!**
+Currently, it has some rough edges.
 
-Other VPN providers or self-hosted VPNs are not directly supported, but you can integrate them manually.
+Other VPN providers or self-hosted VPNs are not directly supported, but you can integrate them.
 You will need two things for this:
 
+1. You need a key pair, an IP address and optionally the provider's DNS server (you can also use e.g. `8.8.8.8`, but that is not recommended).
+   The public key must be uploaded to the provider.
+   How to do this and to get all of this data is provider dependent.
+   If you have it, you can add it via `vad --static DNS IPV4 IPV6 PRIVATE_KEY_FILENAME`.
 1. A WireGuard relay/server list from the provider, in which each relay has at least one IP address and a public key.
-   But it's a bit more complicated than that, because at the moment the structure of the relay list has to match that of Mullvad.
-   But if you have such a list, you can put it under `/etc/vad/<provider>.json`.
-1. You need to generate a key pair and upload the public key to the provider to get access via their (web) interface.
-   You also need to know your default IP address and the provider's DNS server. Then you can add the following
-   to the `peers` in `/etc/vad/config.yaml`:
-
-    ```yaml
-    - dns: <dns address>
-      ipv4: <ipv4 address or null>
-      ipv6: <ipv6 address or null>
-      private_key: <key>
-      provider: <provider>
-    ```
+   Currently, you can get a list for NordVPN, ProtonVPN (partial), and Surfshark (partial) with `vad update` (after you added one peer).
+   If you want to create custom list or a list another VPN provider, look at `/etc/vad/<provider>.json`.
 
 With network namespaces all programs from users, except programs that run with root privileges, are forced to use the VPN interface to connect to the Internet, without complex `iptable` rules.
 An so-called "kill switch" is already integrated.
@@ -33,40 +28,48 @@ The physical devices will stay inaccessible until an `vad down`.
 
 1. Only works under Linux (requires network namespaces);
 1. You have a Mullvad account;
-1. You only want to use WireGuard relays (not OpenVPN);
-1. You don't have a network interface with the name `vad0` in your root namespace;
+1. You only want to use WireGuard relays (not e.g. OpenVPN);
+1. You don't have a network interface with the name `vad*` in your root namespace;
 1. You don't have other network namespaces with the name `physical` or `vad-*`; and;
 1. You don't want to use Socks Proxies for Multihop.
 
-## Dependencies (TODO)
+## Dependencies
 
-1. `sudo`,
-1. `kill`, `killall`
-1. `timeout`,
-1. `wg`,
-1. `ip`,
-1. `iw` (for wifi),
-1. `sysctl`,
-1. `python-yaml`,
-1. `python-dbus`,
-1. `python-requests`,
-1. `python-termcolor`,
-1. `python-prettytable` (for up, info and list command),
-1. `resolvconf`,
-1. `pass` (optionally).
+1. `ip`
+1. `iw` (for wifi)
+1. `kill`
+1. `ln`
+1. `mkdir`
+1. `pass` (optionally)
+1. `ping`
+1. `sudo`
+1. `sysctl`
+1. `systemctl`
+1. `udevadm`
+1. `wg`
+1. `python-cryptography`
+1. `python-noiseprotocol`
+1. `python-numpy`
+1. `python-prettytable`
+1. `python-pyasn`
+1. `python-pycountry`
+1. `python-requests`
+1. `python-termcolor`
+1. `python-yaml`
 
-## Install Dependencies (TODO)
+## Install Dependencies
 
 Arch Linux based:
 
 ```
-# pacman -Syu --needed python-requests python-termcolor python-yaml python-prettytable python-numpy sudo iw wpa_supplicant dhcpcd openresolv wireguard-tools
+# pacman -Syu --noconfirm python-cryptography python-noiseprotocol python-numpy python-prettytable python-pyasn python-pycountry python-requests python-termcolor python-yaml iw sudo wireguard-tools
 ```
 
 Debian based:
 
 ```
-# apt install python3-requests python3-termcolor python3-yaml python3-prettytable python3-numpy sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
+# apt install -y -q python3-pip python3-cryptography python3-numpy python3-prettytable python3-pyasn python3-pycountry python3-requests python3-termcolor python3-yaml sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
+# pip install --break-system-packages noiseprotocol
 ```
 
 ## Untested
@@ -84,8 +87,9 @@ $ vad init   # Will ask for your account number and saves it
 $ vad up
 ```
 
-If you do not have a configuration file under `/etc/vad/config.yaml`, `vad init` will create a default configuration for you.
-At the moment it assumes that you are using NetworkManager with systemd, in the future it may automatically find a suitable configuration for you.
+If you do not have a configuration file under `/etc/vad/1-physical.yaml`, `vad init` will create a default configuration for you.
+The name `1-physical` refers to the source namespace `physical` and target namespace `1` (which is the root namespace, where normally your network interfaces reside).
+At the moment it assumes that you are using NetworkManager under systemd, in the future it might automatically find a suitable configuration for you.
 The configuration will look like this:
 
 ```yaml
@@ -95,9 +99,9 @@ post_down:
 - systemctl start NetworkManager
 post_up:
 - mkdir -p /etc/systemd/system/wpa_supplicant.service.d
-- printf '[Service]\nNetworkNamespacePath=/var/run/netns/physical' > /etc/systemd/system/wpa_supplicant.service.d/override.conf
+- printf '[Service]\nNetworkNamespacePath=/var/run/netns/physical\nBindPaths=/etc/netns/physical/resolv.conf:/etc/resolv.conf' > /etc/systemd/system/wpa_supplicant.service.d/override.conf
 - mkdir -p /etc/systemd/system/NetworkManager.service.d
-- printf '[Service]\nNetworkNamespacePath=/var/run/netns/physical' > /etc/systemd/system/NetworkManager.service.d/override.conf
+- printf '[Service]\nNetworkNamespacePath=/var/run/netns/physical\nBindPaths=/etc/netns/physical/resolv.conf:/etc/resolv.conf' > /etc/systemd/system/NetworkManager.service.d/override.conf
 - systemctl daemon-reload
 - systemctl start NetworkManager
 pre_down:
@@ -116,6 +120,7 @@ Show status information:
 
 ```sh
 $ vad show
+$ vad show --wireguard-interfaces
 $ vad
 ```
 
@@ -140,7 +145,7 @@ $ vad
 Build a 3 hop tunnel:
 
 ```sh
-$ vad add           #  We need one more peer for the first tunnel
+$ vad add           # We need one more peer for the first tunnel
 $ vad up de pl se   # 3 hops: Tunnel(de) -> Multihop(pl, se)
 $ vad
 ```
@@ -148,7 +153,10 @@ $ vad
 Build a 3 hop circuit with the default path selection algorithm:
 
 ```sh
-$ vad up default   # The first and last hop has not the same provider
+$ vad up default   # You need three different providers!
+                   # Each hop will have a different provider.
+                   # The first and last hop will have a different AS.
+                   # Currently, it does not implement a full AS path inference algorithm!
 $ vad
 ```
 
@@ -188,7 +196,7 @@ Move your sshd into the physical namespace on `vad up`:
 
 ```sh
 $ vad down   # `post_up`, `post_down`, `pre_up` and `pre_down` will not be called for a partial down and up
-$ # Add the following to your `/etc/vad/config.yaml`:
+$ # Add the following to your `/etc/vad/1-physical.yaml`:
 [...]
 post_up:
 - mkdir -p /etc/systemd/system/sshd.service.d
@@ -202,12 +210,13 @@ post_down:
 $ vad up
 ```
 
-You want to use other `*_up` and/or `*_down` commands; and a differnt hop configuration for work?
-Copy your current configuration `/etc/vad/config.yaml` to `/etc/vad/work.yaml`.
+You want to use other `*_up` and/or `*_down` commands for work?
+Copy your current configuration `/etc/vad/1-physical.yaml` to `/etc/vad/work.yaml`.
 
 ```sh
-$ vad -c /etc/vad/work.yaml up --dns atmpg eu  # Connect to a random relay in the European Union. See `vad up --help` for `--dns` flags.
-$ vad -c /etc/vad/work.yaml up                 # Connect to another random relay in the European Union with the same nameserver.
+$ vad down                                     # Necessary, otherwise the commands will not be executed, because the circuit already exists!
+$ vad up -c /etc/vad/work.yaml --dns atmpg eu  # Connect to a random relay in the European Union. See `vad up --help` for `--dns` flags.
+$ vad up                                       # Connect to another random relay in the European Union with the same nameserver.
 ```
 
 Onion Service (**HIGHLY EXPERIMENTAL!**):
@@ -231,36 +240,27 @@ Reset:
 
 ```sh
 $ vad reset
-$ # Corresponds to the following commands, but additonally deletes account-related information from the configuration file.
+$ # Corresponds to the following commands:
 $ # vad delete --all
 $ # vad uninstall
 $ # vad down
+$ # vad clear # delete account-related information from the state file
 ```
 
 ## TODOs
 
-* [ ] Add `vad clear` to delete account releated information
 * [ ] Find a way to make city codes unique
 * [ ] Add type hinting for command line arguments.
-* [ ] Bundling of all functions in a platform class that use the operating system or the environment.
 * [ ] Integration testing with Vagrant
 * [ ] Add some documentation comments
 * [ ] Test if dependencies are installed while launching
 * [ ] Replace `wg` with `python-iproute2` netlink interface
-* [ ] Is directly writing `/etc/resolv.conf` the most universal way to configure DNS?
+* [ ] Implement a AS path inference algorithm and automatically create circuits as necessary.
 
 ## Ideas
 
 * Use anonymous namespaces (except for physical); only optionally name the namespaces to allow easy access with `ip netns exec <namespace>`.
   Is this even possible? When in between namespaces do not have any process running and only have an active WireGuard interface?
-* Add `--pick-different-as` and remove `--uniform-by-country`.
-  This flag will pick a different country and provider pair for each hop after user provided filter criteria.
-  It will hopefully prevent picking the same (virtual/overlay) autonomous system (AS) for each hop.
-  We use the term AS a bit loosely here.
-  We basically want to prevent that two hops are under the control of one entity.
-  This is not very useful, because Mullvad is the only supported provider.
-  Picking different AS's for differnt hops is not enough! The network paths from client to entry and exit to destination should not have any overlapping AS's.
-  But then the tunnel must be restricted to the destination, maybe with a socks proxy.
 
 ## Related projects
 
