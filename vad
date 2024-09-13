@@ -734,10 +734,12 @@ class State(Base):
             os.chmod(filename, 0o600)
             yaml.dump(self.to_dict(), s)
 
-    def get_available_peers(self) -> List[Peer]:
+    def get_available_peers(self, source: str, target: str) -> List[Peer]:
         private_keys = set()
         for circuit in self.circuits.values():
             if circuit.is_active():
+                if circuit.namespace_source == source and circuit.namespace_target == target:
+                    continue
                 for hop in circuit.hops:
                     private_keys.add(hop.peer.private_key)
 
@@ -976,7 +978,7 @@ class Mullvad(Provider):
             peer.ipv4 = mullvad_peer.ipv4_address
             peer.ipv6 = mullvad_peer.ipv6_address
             # FIXME: Implement backoff
-            time.sleep(4)
+            time.sleep(5)
 
     def update(self) -> List[Relay]:
         relays = []
@@ -1785,11 +1787,11 @@ def init_command(args: Args):
         else:
             log_fatal('Already initialized with at least one peer. If you want to add a new peer, use `vad add --provider=%s`.' % args.provider)
 
-    if count == 0:
-        update_command(Args())
-
     Provider.by_name(args.provider).init(state, args.passname, args.dont_save_account_number)
     Provider.by_name(args.provider).add(state, args.passname, 1)
+
+    if count == 0:
+        update_command(Args())
 
     log_info('Initialized with one peer, you can now use `vad up`')
 
@@ -2253,7 +2255,7 @@ def up_command(args: Args, parser_up: ArgumentParser):
     if len(state.peers) == 0:
         log_fatal('No peers configured (use `vad init` to create a peer)!')
 
-    available_peers = state.get_available_peers()
+    available_peers = state.get_available_peers(args.namespace_source, args.namespace_target)
 
     num_hops = len(args.COUNTRY_CITY_HOSTNAME)
     if len(args.COUNTRY_CITY_HOSTNAME) == 1 and args.COUNTRY_CITY_HOSTNAME[0] == 'default':
@@ -2394,7 +2396,8 @@ def up_command(args: Args, parser_up: ArgumentParser):
                 write_resolvconf('/etc/netns/%s/resolv.conf' % namespace, hop.peer.dns)
 
     if not is_default and not args.dont_save:
-        circuit.up_command = sys.argv[sys.argv.index('up')+1:]
+        if 'up' in sys.argv:
+            circuit.up_command = sys.argv[sys.argv.index('up')+1:]
 
     if not source_already_existed:
         run_commands('post up', circuit.post_up)
@@ -2967,7 +2970,6 @@ def introduction_point_connect(key: X25519PrivateKey, proxy_address: Tuple[str, 
         peer = ipv4_unpack(data[1:])
         peer_udp = UDPSocket(udp.sock, peer)
         punch_hole('Client', peer_udp)
-        # peer_udp.recv(0)
 
         conn = NoiseConnection.from_name(b'Noise_KK_25519_ChaChaPoly_BLAKE2s')
         conn.set_keypair_from_private_bytes(Keypair.STATIC, key.private_bytes_raw())
@@ -3241,7 +3243,6 @@ def update_command(_: Args):
         os.chdir(cwd)
 
     set_providers = set(state.provider.get_active_provider())
-    set_providers.update(SUPPORTED_PROVIDERS)
 
     providers = list(set_providers)
 
@@ -3305,8 +3306,6 @@ class TestDependencies(unittest.TestCase):
         commands = [
             "sudo",
             "kill",
-            "killall",
-            "timeout",
             "wg",
             "ip",
             "iw",
