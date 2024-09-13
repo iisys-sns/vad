@@ -2059,7 +2059,7 @@ def path_selection(relays: List[Relay], path: List[str], owned_entry: bool, unif
     return selected_path
 
 
-def path_selection_default(relays: List[Relay]) -> List[Relay]:
+def path_selection_default(relays: List[Relay], testing_dont_require_distinct_providers: bool = False) -> List[Relay]:
     # (1) Select a entry relay
     #     (a) Select a VPN provider uniform at random
     #     (b) Select a relay from this provider uniform at random
@@ -2083,15 +2083,17 @@ def path_selection_default(relays: List[Relay]) -> List[Relay]:
     # (1) Select a entry relay
     entry_provider = random.choice(providers)
     entry_relay = random.choice(relays_by_provider[entry_provider])
-    providers.remove(entry_provider)
+    if not testing_dont_require_distinct_providers:
+        providers.remove(entry_provider)
 
     # (2) Select a middle relay
     middle_provider = random.choice(providers)
     middle_relay = random.choice(relays_by_provider[middle_provider])
-    providers.remove(middle_provider)
+    if not testing_dont_require_distinct_providers:
+        providers.remove(middle_provider)
 
     # (3) Select a exit relay
-    # WARN: For (c) and (d) we do not use full ASN path interference and use the provider attribute as a proxy.
+    # WARN: For (c) and (d) we do not use full ASN path interference and use the `asn` attribute as a proxy.
     exit_provider = random.choice(providers)
     relays_selected = list(filter(lambda relay: relay.asn != entry_relay.asn, relays_by_provider[exit_provider]))
     exit_relay_idx = random.randint(0, len(relays_selected)-1)
@@ -2273,7 +2275,7 @@ def up_command(args: Args, parser_up: ArgumentParser):
     relays = load_relays([peer.provider for peer in available_peers])
 
     if len(args.COUNTRY_CITY_HOSTNAME) == 1 and args.COUNTRY_CITY_HOSTNAME[0] == 'default':
-        path_relays = path_selection_default(relays)
+        path_relays = path_selection_default(relays, args.dont_require_distinct_providers)
     else:
         path_relays = path_selection(
             relays,
@@ -3584,15 +3586,16 @@ def vad():
     up.add_argument('-u', '--uniform-by-country', action='store_true', help='Randomly select a country and then randomly select a hop.')
     up.add_argument('-o', '--owned-entry', action='store_true', help='Use a owned relay by Mullvad for your entry hop.')
     up.add_argument('-6', '--only-use-ipv6', action='store_true', help='Only use IPv6 addresses.')
-    up.add_argument('-t', '--namespace-target', help='EXPERIMENTAL: You can specific which namespace will have access to the tunnel, if this option is not present, it will be the root namespace, which is called "1" under Linux.', default=NAMESPACE_ROOT)
-    up.add_argument('-b', '--namespace-source', help='EXPERIMENTAL: You can specific the namespace where tunnel has access to (physical) interfaces. Usually it is the physical namespace.', default=NAMESPACE_PHYSICAL)
+    up.add_argument('-t', '--namespace-target', help='You can specific which namespace will have access to the tunnel, if this option is not present, it will be the root namespace, which is called "1" under Linux.', default=NAMESPACE_ROOT)
+    up.add_argument('-b', '--namespace-source', help='You can specific the namespace where tunnel has access to (physical) interfaces. Usually it is the physical namespace.', default=NAMESPACE_PHYSICAL)
     up.add_argument('-c', '--config', help='Use this configuration file', default=None)
+    up.add_argument('-e', '--dont-require-distinct-providers', action='store_true', help='Only for testing purposes and only usable with the "default" path selection. Do not require distinct providers per hop.', default=False)
     up.set_defaults(func=up_command)
 
     down = subparsers.add_parser('down', aliases=['d'], help='Tear down the vpn configuration and restore the previous state.')
     down.add_argument('-p', '--partial', action='store_true', help=f'Do not delete the physical namespace. Your physical network interfaces will remain in this namespace, which leaves you with no network access at all. Useful if you manually configured your physical network namespace.', default=False)
-    down.add_argument('-t', '--namespace-target', help='EXPERIMENTAL: Specific the traget namespace', default=None)
-    down.add_argument('-b', '--namespace-source', help='EXPERIMENTAL: Specific the source namespace', default=None)
+    down.add_argument('-t', '--namespace-target', help='Specific the traget namespace', default=None)
+    down.add_argument('-b', '--namespace-source', help='Specific the source namespace', default=None)
     down.set_defaults(func=down_command)
 
     exec = subparsers.add_parser('exec', aliases=['e'], help='Execute command in the physical namespace. The command can use the physical network interfaces directly.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
