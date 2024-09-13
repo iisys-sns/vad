@@ -3411,7 +3411,9 @@ class TestGetDnsServerFromFlags(TestCase):
 
 class TestMullvadIntegration(unittest.TestCase):
     def test(self):
-        import base64
+        become_root()
+
+        state = state_load()
 
         with MullvadAPI() as api:
             connected = api.connected()
@@ -3423,7 +3425,7 @@ class TestMullvadIntegration(unittest.TestCase):
             self.assertTrue(len(relays) > 200)
             self.assertEqual(type(relays[0]), MullvadRelay)
 
-            with api.authenticate(Mullvad().user_request_account_number('web/mullvad')) as auth:
+            with api.authenticate(str(state.provider.mullvad.account_number), state.provider.mullvad.access_token) as auth:
                 public_key = str(base64.encodebytes(os.urandom(32)), 'utf8').strip()
                 public_key2 = str(base64.encodebytes(os.urandom(32)), 'utf8').strip()
 
@@ -3455,8 +3457,8 @@ class TestOnionVpnUrl(unittest.TestCase):
 
         self.assertIsInstance(url.ipv4, str)
         self.assertIsInstance(url_.ipv4, str)
-        self.assertIsInstance(url.port_ip, str)
-        self.assertIsInstance(url_.port_ip, str)
+        self.assertIsInstance(url.port_ip, int)
+        self.assertIsInstance(url_.port_ip, int)
         self.assertIsInstance(url.public_key, bytes)
         self.assertIsInstance(url_.public_key, bytes)
 
@@ -3490,22 +3492,23 @@ def test_command(args):
         images.append(test_build_image('archlinux', not args.docker_skip_build,
             """
             FROM {base_image}
-            RUN pacman -Syu --noconfirm python-requests python-dbus python-yaml python-prettytable python-numpy sudo iw wireguard-tools
+            RUN pacman -Syu --noconfirm python-cryptography python-noiseprotocol python-numpy python-prettytable python-pyasn python-pycountry python-requests python-termcolor python-yaml iw sudo wireguard-tools
             """
         ))
 
-        for base_image in ['ubuntu', 'ubuntu:20.04', 'debian']:
+        for base_image in ['ubuntu', 'debian']:
             images.append(test_build_image(base_image, not args.docker_skip_build,
                 """
                 FROM {base_image}
-                RUN apt update && apt install -y -q python3-dbus python3-requests python3-yaml python3-prettytable python3-numpy sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
+                RUN apt update
+                RUN apt install -y -q python3-pip python3-cryptography python3-numpy python3-prettytable python3-pyasn python3-pycountry python3-requests python3-termcolor python3-yaml sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
+                RUN pip install --break-system-packages noiseprotocol
                 """
             ))
 
-
         path = sys.argv[0]
         for image in images:
-            command = f"docker run --rm -v /etc/vad/mullvad.json:/etc/vad/mullvad.json -v {path}:/bin/vad {image} vad test"
+            command = f"docker run --rm -v /var/lib/vad/state:/var/lib/vad/state -v /etc/vad/asn.dat:/etc/vad/asn.dat -v /etc/vad/asnames.json:/etc/vad/asnames.json -v /etc/vad/mullvad.json:/etc/vad/mullvad.json -v {path}:/bin/vad {image} vad test"
             print(command)
             subprocess.run(command, shell=True, check=True)
     else:
