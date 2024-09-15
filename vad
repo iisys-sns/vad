@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import atexit
 import base64
@@ -49,8 +51,8 @@ from dataclasses import field
 from types import UnionType, NoneType
 from typing import Tuple, TypeVar, Type, Set, Dict, DefaultDict, Any, List, Optional, Union, NoReturn, Deque, Iterable, get_type_hints, get_args, get_origin
 
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from noise.connection import NoiseConnection, Keypair
 
@@ -82,7 +84,7 @@ ACTION_CONNECT = 2
 ACTION_TEST = 3
 
 RESPONSE_ACK = 10
-RESPONSE_NCK = 11
+RESPONSE_NCK = 1
 RESPONSE_CLIENT_CONNECT = 12
 RESPONSE_STOP_LISTING = 13
 
@@ -118,35 +120,34 @@ class Device:
 
 
 @dataclass
-class OnionVpnUrl:
-    ipv4: str
-    port_ip: int
+class OnionVpnUrlOneOffService:
+    ip: str
+    port: int
     public_key: bytes
+    service_public_key: bytes
 
     def to_url(self) -> str:
-        ipv4_bytes = ipaddress.IPv4Address(self.ipv4).packed
-        port_ip_bytes = struct.pack('!H', int(self.port_ip))
-        url = bytes([0, 0]) + ipv4_bytes + port_ip_bytes + self.public_key
+        ip_bytes = ipaddress.IPv4Address(self.ip).packed
+        port_bytes = struct.pack('!H', int(self.port))
+        url = ip_bytes + port_bytes + self.public_key + self.service_public_key
         return base64.b32encode(url).decode('utf8').lower() + '.onion.vpn'
-
-    def ed25519_public_key(self) -> Ed25519PublicKey:
-        return Ed25519PublicKey.from_public_bytes(self.public_key)
 
     def __repr__(self) -> str:
         return self.to_url()
 
     @staticmethod
-    def from_url(url: str) -> 'OnionVpnUrl':
+    def from_url(url: str) -> 'OnionVpnUrlOneOffService':
         suffix = url[-10:]
         assert suffix == '.onion.vpn'
         url = url[:-10]
         url_decoded = base64.b32decode(url.upper())
-        url_decoded = url_decoded[2:]
-        ipv4 = str(ipaddress.IPv4Address(url_decoded[0:4]))
-        port_ip = struct.unpack('!H', url_decoded[4:6])[0]
-        public_key = url_decoded[6:]
+        ip = str(ipaddress.IPv4Address(url_decoded[0:4]))
+        port = struct.unpack('!H', url_decoded[4:6])[0]
+        public_key = url_decoded[6:6+32]
         assert len(public_key) == 32
-        return OnionVpnUrl(ipv4, port_ip, public_key)
+        service_public_key = url_decoded[6+32:]
+        assert len(service_public_key) == 32
+        return OnionVpnUrlOneOffService(ip, port, public_key, service_public_key)
 
 
 MS_RDONLY = 1
@@ -185,6 +186,7 @@ class NetworkNamespace:
         self.namespace_name = namespace_name
         self.current_net_ns = -1
         self.target_net_ns = -1
+        self.cwd = os.getcwd()
 
     def __enter__(self):
         if self.namespace_name == NAMESPACE_ROOT:
@@ -251,6 +253,8 @@ class NetworkNamespace:
             log_fatal("Failed to change netns back: %s" % (errmsg))
         os.close(self.current_mnt_ns)
         os.close(self.current_net_ns)
+
+        os.chdir(self.cwd)
 
         log_verbose("Leave network namespace %s" % self.namespace_name)
 
@@ -333,7 +337,7 @@ def initiator_do_handshake(name, udp: UDPSocket, conn: NoiseConnection) -> Noise
         udp.send(message)
         print(f'{name}: Handshake receive...')
         received = udp.recv(2048)
-        print(f'{name}: Handshake received from %s:%d' % udp.address)
+        print(f'{name}: Handshake received from %s:%d (len=%d)' % (*udp.address, len(received)))
         _ = conn.read_message(received)
         assert conn.handshake_finished
         print(f'{name}: Handshake done')
@@ -380,14 +384,15 @@ class Proxy:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         try:
-            sock.settimeout(10)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(('0.0.0.0' , self.port))
             while True:
                 try:
                     print('Proxy: Waiting for messages...')
+                    sock.settimeout(None)
                     _, address = sock.recvfrom(0, socket.MSG_PEEK)
                     if address not in self.peers:
+                        sock.settimeout(10)
                         print('Proxy: New peer')
                         peer = ProxyPeer(UDPSocket(sock, address))
                         self.peers[address] = peer
@@ -400,7 +405,8 @@ class Proxy:
 
     def state_handshake(self, peer: ProxyPeer):
         noise = NoiseConnection.from_name(b'Noise_IK_25519_ChaChaPoly_BLAKE2s')
-        noise.set_keypair_from_private_bytes(Keypair.STATIC, self.key.private_bytes_raw())
+        noise.set_keypair_from_private_bytes(Keypair.STATIC, self.key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()))
+
         assert isinstance(peer.udp, UDPSocket)
         peer.udp = responder_do_handshake('Proxy', peer.udp, noise)
         peer.public_key = peer.udp.public_key
@@ -1342,25 +1348,15 @@ class MullvadAPIAuth(MullvadAPI):
         return from_dict(MullvadPeer, response.json())
 
 
-def punch_hole(name, udp: UDPSocket, number_of_messages=10):
-    count = 0
-    failure = 0
+def punch_hole(name, udp: UDPSocket, number_of_messages=2):
     udp.settimeout(1)
-    while True:
+    for _ in range(number_of_messages):
         try:
-            print(f'{name}: Punchy punchy hole to %s:%d' % udp.address[0:2], end='')
+            print(f'{name}: punch hole to %s:%d' % udp.address[0:2])
             udp.send(b'')
-            data = udp.recv(0)
-            if len(data) == 0:
-                print(' (success)')
-                count += 1
-                if count == number_of_messages:
-                    break
-        except TimeoutError as error:
-            failure += 1
-            if failure > 10:
-                raise error
-            continue
+            udp.recv(0)
+        except TimeoutError:
+            print(f'{name}: punch hole timeout')
 
     try:
         while True:
@@ -1370,7 +1366,7 @@ def punch_hole(name, udp: UDPSocket, number_of_messages=10):
             else:
                 break
     except TimeoutError:
-        pass
+        print(f'{name}: punch hole receive timeout')
 
 
 def get_socket_proxy_client(proxy_address, port=0):
@@ -1495,13 +1491,6 @@ def from_base64(data: str) -> bytes:
     return base64.b64decode(data)
 
 
-# TODO:: Hardcoded and DNS names are not supported at the moment, you need to replace 'proxy' with you public ip address!
-PROXY_ADDRESS: Tuple[str, int] = ('proxy', 50398)
-PROXY_KEY = X25519PrivateKey.from_private_bytes(from_base64('KEGMxadHKE4F0dtQ/SiYYL5/EnW6xlXna1dTF+pj8n4='))
-SERVICE_KEY = X25519PrivateKey.from_private_bytes(from_base64('+Gnm7XzLwm+ioOaVBca3ZS1UL2bklpaYD/688rnOV24='))
-
-
-
 def ipv4_pack(ip: str, port: int) -> bytes:
     ip_packed = ipaddress.IPv4Address(ip).packed
     port_packed = struct.pack('!H', port)
@@ -1609,7 +1598,7 @@ def wireguard_device_setup(namespace: str, device_name: str, ipv4: Optional[str]
     run_in_namespace_or_fail(namespace, ["ip", "link", "set", device_name, "up"])
     run_in_namespace_or_fail(namespace, ["ip", "link", "set", device_name, "mtu", str(mtu)])
     run_in_namespace_or_fail(namespace, ["ip", "route", "add", "default", "dev", device_name])
-    # run_in_namespace_or_fail(namespace, ["ip", "route", "add", "::/0", "dev", device_name])
+    run_in_namespace_or_fail(namespace, ["ip", "route", "add", "::/0", "dev", device_name])
 
 
 def wireguard_add_peer(namespace:str, device_name:str, public_key:str, endpoint:Optional[str]=None, allowed_ips:str='0.0.0.0/0,::0/0', persistent_keepalive:int=0):
@@ -2791,7 +2780,7 @@ def generate_ipv6_private_address() -> ipaddress.IPv6Interface:
     )
 
 
-def get_rp_address(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, port_rp: int):
+def get_rp_address(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, port_rp: int) -> Tuple[str, int]:
     udp_rp = get_socket_proxy_client(proxy_address, port_rp)
 
     conn = NoiseConnection.from_name(b'Noise_IK_25519_ChaChaPoly_BLAKE2s')
@@ -2814,6 +2803,7 @@ def get_rp_address(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_
 # NOTE: Assumption: Every unique (protcol, private address, port) combination is mapped to the same public combination
 def introduction_point_service(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, our_rp_address: Tuple[str, int], port_service: int) -> Tuple[str, X25519PublicKey, Tuple[str, int]]:
     udp = get_socket_proxy_client(proxy_address)
+    udp.sock.settimeout(None)
 
     conn = NoiseConnection.from_name(b'Noise_IK_25519_ChaChaPoly_BLAKE2s')
     conn.set_keypair_from_private_bytes(Keypair.STATIC, key.private_bytes_raw())
@@ -2862,10 +2852,11 @@ def introduction_point_service(key: X25519PrivateKey, proxy_address: Tuple[str, 
 # TODO: -> Introduce `max_connections` and `max_connections_per_second`
 # TODO: -> Automatically remove wireguard peers
 # NOTE: WIP: This function just demonstrates how it could work, but it is far from production ready!
-def introduction_point(stop: threading.Event, service_key: X25519PrivateKey, namespace: str, device_name: str, our_rp_address, port_service: int):
+def introduction_point(stop: threading.Event, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, service_key: X25519PrivateKey, namespace: str, device_name: str, our_rp_address, port_service: int):
     while not stop.is_set():
-        ipv6, peer_public_key, their_rp_address = introduction_point_service(service_key, PROXY_ADDRESS, PROXY_KEY.public_key(), our_rp_address, port_service)
-        rp_ipv4, rp_port = their_rp_address
+        with NetworkNamespace('service_start'):
+            ipv6, peer_public_key, their_rp_address = introduction_point_service(service_key, proxy_address, proxy_public_key, our_rp_address, port_service)
+            rp_ipv4, rp_port = their_rp_address
         wireguard_add_peer(namespace, device_name, to_base64(peer_public_key.public_bytes_raw()), endpoint=f'{rp_ipv4}:{rp_port}', allowed_ips=f'{ipv6}', persistent_keepalive=25)
         with NetworkNamespace('service'):
             run(['ping', '-c', '5', '-6', str(ipv6)])
@@ -2890,44 +2881,66 @@ def copy_to_clipboard(message: str):
 
 
 def proxy_command(args):
-    Proxy(PROXY_KEY, args.port).start()
+    proxy_key = X25519PrivateKey.generate()
+
+    ip = get_my_public_ip()
+    port = args.port
+    public_key = to_base64(proxy_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))
+    command = f"vad -v start -i {ip} -p {port} -k '{public_key}' python -m http.server 8000 --bind ::"
+    print()
+    print(command)
+    print()
+
+    Proxy(proxy_key, port).start()
 
 
 def start_command(args: Args):
     become_root()
 
-    # FIXME: inflexible
-    # if not is_active():
-    #     up_command(Args(**up_command_defaults), True)
-
     introduction_point_thread = None
     stop_event = None
     service_process = None
+
+    proxy_address = (args.proxy_ip, int(args.proxy_port))
+    proxy_key = X25519PublicKey.from_public_bytes(from_base64(args.proxy_key))
+    service_key = X25519PrivateKey.generate()
 
     def start():
         nonlocal introduction_point_thread
         nonlocal stop_event
         nonlocal service_process
 
-        stop_event = threading.Event()
-
         local_rp_port = random.randint(40000, 2**16)
-        rp_address = get_rp_address(SERVICE_KEY, PROXY_ADDRESS, PROXY_KEY.public_key(), local_rp_port)
+        with NetworkNamespace('service_start'):
+            rp_address = get_rp_address(service_key, proxy_address, proxy_key, local_rp_port)
 
-        introduction_point_thread = threading.Thread(target=introduction_point, args=(stop_event, SERVICE_KEY, 'service', 'service0', rp_address, '8000'))
+        stop_event = threading.Event()
+        introduction_point_thread = threading.Thread(target=introduction_point, args=(stop_event, proxy_address, proxy_key, service_key, 'service', 'service0', rp_address, '8000'))
 
-        url = OnionVpnUrl(PROXY_ADDRESS[0], PROXY_ADDRESS[1], PROXY_KEY.public_key().public_bytes_raw())
-        copy_to_clipboard('vad -v connect ' + str(url))
+        url = OnionVpnUrlOneOffService(proxy_address[0], proxy_address[1], proxy_key.public_bytes_raw(), service_key.public_key().public_bytes_raw())
+
+        command = 'vad -v connect ' + str(url)
+        print()
+        print(command)
+        print()
+        copy_to_clipboard(command)
+
         log_info('Share this URL with a client: ' + str(url) + " (It does not work with a regular web browser)")
 
-        num_hops = 0
+        num_hops = 1
         create_network_namespace('service')
-        wireguard_init('service', 'service0', NAMESPACE_ROOT, to_base64(SERVICE_KEY.private_bytes_raw()), local_rp_port)
+        wireguard_init('service', 'service0', 'service_start', to_base64(service_key.private_bytes_raw()), local_rp_port)
         wireguard_device_setup('service', 'service0', 'fc00::1', None, 1420 - (num_hops*80))
 
         log_info('Start introduction point')
         introduction_point_thread.start()
-        service_process = subprocess.Popen(['ip', 'netns', 'exec', 'service'] + args.CMD)
+
+        with NetworkNamespace('service'):
+            uid = os.getenv('SUDO_UID', os.geteuid())
+            gid = os.getenv('SUDO_GID', os.getegid())
+            command = ['sudo', '-E', '-u', '#%s' % uid, '-g', '#%s' % gid, "--"] + args.CMD
+            # command = args.CMD
+            service_process = subprocess.Popen(command)
 
     def cleanup():
         if stop_event is not None:
@@ -2940,11 +2953,10 @@ def start_command(args: Args):
         remove_device('service', 'service0')
         remove_network_namespace('service')
 
-    try:
-        start()
-        input()
-    finally:
-        cleanup()
+    atexit.register(cleanup)
+    start()
+    input()
+
 
 def introduction_point_connect(key: X25519PrivateKey, proxy_address: Tuple[str, int], proxy_public_key: X25519PublicKey, service_public_key: X25519PublicKey, our_rp_address: Tuple[str, int]) -> Optional[Tuple[str, int, Tuple[str, int]]]:
     udp = get_socket_proxy_client(proxy_address)
@@ -2994,40 +3006,40 @@ def introduction_point_connect(key: X25519PrivateKey, proxy_address: Tuple[str, 
     return None
 
 
-def connect_command(args):
+def connect_command(args: Args):
     become_root(do_lock=False)
 
-    # FIXME: inflexible
-    # if no is_active():
-    #   up_command(Args(**up_command_defaults), True)
-
-    url = OnionVpnUrl.from_url(args.URL[0])
+    url = OnionVpnUrlOneOffService.from_url(args.URL[0])
 
     log_info('Service Information:', highlight=True)
-    log('- ip address: ' + url.ipv4)
-    log('- introduction point port: ' + str(url.port_ip))
-    log('- service sign public key: ' + to_base64(url.public_key))
+    log('- service intro address: ' + url.ip)
+    log('- service intro port: ' + str(url.port))
+    log('- service intro public key: ' + to_base64(url.public_key))
+    log('- service public key: ' + to_base64(url.service_public_key))
 
-    # TODO: hardcoded
-    client_key = X25519PrivateKey.from_private_bytes(from_base64('0Bz3Vpa47HCoNYrWmtZDfDFi4mEuXmgPC6Nk8mA8aU8='))
+    client_key = X25519PrivateKey.generate()
+    service_key = X25519PublicKey.from_public_bytes(url.service_public_key)
 
-    local_rp_port = random.randint(40000, 2**16)
-    our_rp_address = get_rp_address(client_key, PROXY_ADDRESS, PROXY_KEY.public_key(), local_rp_port)
+    with NetworkNamespace(args.namespace_source):
+        proxy_address = (url.ip, url.port)
+        proxy_public_key = X25519PublicKey.from_public_bytes(url.public_key)
+        local_rp_port = random.randint(40000, 2**16)
+        our_rp_address = get_rp_address(client_key, proxy_address, proxy_public_key, local_rp_port)
 
-    log_info('IP: Connecting to introduction point', highlight=True)
-    result = introduction_point_connect(client_key, (url.ipv4, int(url.port_ip)), X25519PublicKey.from_public_bytes(url.public_key), SERVICE_KEY.public_key(), our_rp_address)
-    if result is None:
-        return
-    our_ipv6, service_port, their_rp_address = result
-    rp_ipv4, rp_port = their_rp_address
-    log('IP: Got our ip address from the service: ' + our_ipv6)
+        log_info('IP: Connecting to introduction point', highlight=True)
+        result = introduction_point_connect(client_key, (url.ip, int(url.port)), proxy_public_key, service_key, our_rp_address)
+        if result is None:
+            return
+        our_ipv6, service_port, their_rp_address = result
+        rp_ipv4, rp_port = their_rp_address
+        log('IP: Got our ip address from the service: ' + our_ipv6)
 
     try:
-        num_hops = 0
+        num_hops = 1
         create_network_namespace('client')
-        wireguard_init('client', 'client0', NAMESPACE_ROOT, to_base64(client_key.private_bytes_raw()), local_rp_port)
+        wireguard_init('client', 'client0', args.namespace_source, to_base64(client_key.private_bytes_raw()), local_rp_port)
         wireguard_device_setup('client', 'client0', None, our_ipv6, 1420 - (num_hops*80))
-        wireguard_add_peer('client', 'client0', to_base64(SERVICE_KEY.public_key().public_bytes_raw()), endpoint=f'{rp_ipv4}:{rp_port}', allowed_ips='fc00::1/128', persistent_keepalive=25)
+        wireguard_add_peer('client', 'client0', to_base64(service_key.public_bytes_raw()), endpoint=f'{rp_ipv4}:{rp_port}', allowed_ips='fc00::1/128', persistent_keepalive=25)
         with NetworkNamespace('client'):
             run(['ping', '-c', '5', '-6', 'fc00::1'])
         run_in_namespace_or_fail('client', ['chromium', f'http://[fc00::1]:{service_port}'], as_user=True)
@@ -3446,29 +3458,32 @@ class TestMullvadIntegration(unittest.TestCase):
                 self.assertEqual(len(peers), len(auth.peers()))
 
 
-class TestOnionVpnUrl(unittest.TestCase):
+class TestOnionVpnUrlOneOffService(unittest.TestCase):
     def test(self):
-        url = OnionVpnUrl('123.45.6.78', 6666, bytes([1]*32))
-        url_ = OnionVpnUrl.from_url(str(url))
+        url = OnionVpnUrlOneOffService('123.45.6.78', 6666, bytes([1]*32), bytes([2]*32))
+        url_ = OnionVpnUrlOneOffService.from_url(str(url))
 
-        self.assertEqual(url.ipv4, '123.45.6.78')
-        self.assertEqual(url.port_ip, 6666)
+        self.assertEqual(url.ip, '123.45.6.78')
+        self.assertEqual(url.port, 6666)
         self.assertEqual(url.public_key, bytes([1]*32))
 
-        self.assertIsInstance(url.ipv4, str)
-        self.assertIsInstance(url_.ipv4, str)
-        self.assertIsInstance(url.port_ip, int)
-        self.assertIsInstance(url_.port_ip, int)
+        self.assertIsInstance(url.ip, str)
+        self.assertIsInstance(url_.ip, str)
+        self.assertIsInstance(url.port, int)
+        self.assertIsInstance(url_.port, int)
         self.assertIsInstance(url.public_key, bytes)
         self.assertIsInstance(url_.public_key, bytes)
+        self.assertIsInstance(url.service_public_key, bytes)
 
-        self.assertEqual(url.ipv4, url_.ipv4)
-        self.assertEqual(url.port_ip, url_.port_ip)
+        self.assertEqual(url.ip, url_.ip)
+        self.assertEqual(url.port, url_.port)
         self.assertEqual(url.public_key, url_.public_key)
         self.assertEqual(len(url.public_key), 32)
         self.assertEqual(len(url_.public_key), 32)
+        self.assertEqual(url.public_key[1], 1)
+        self.assertEqual(url.service_public_key[1], 2)
 
-        self.assertEqual(str(url), 'aaahwligjynauaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaib.onion.vpn')
+        self.assertEqual(str(url), 'pmwqmtq2biaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqc.onion.vpn')
 
 
 def test_build_image(base_image, build, Dockerfile):
@@ -3497,12 +3512,22 @@ def test_command(args):
         ))
 
         for base_image in ['ubuntu', 'debian']:
+           images.append(test_build_image(base_image, not args.docker_skip_build,
+               """
+               FROM {base_image}
+               RUN apt update
+               RUN apt install -y -q python3-pip python3-cryptography python3-numpy python3-prettytable python3-pyasn python3-pycountry python3-requests python3-termcolor python3-yaml sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
+               RUN pip install --break-system-packages noiseprotocol
+               """
+           ))
+
+        for base_image in ['ubuntu:22.04']:
             images.append(test_build_image(base_image, not args.docker_skip_build,
                 """
                 FROM {base_image}
                 RUN apt update
                 RUN apt install -y -q python3-pip python3-cryptography python3-numpy python3-prettytable python3-pyasn python3-pycountry python3-requests python3-termcolor python3-yaml sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
-                RUN pip install --break-system-packages noiseprotocol
+                RUN pip install noiseprotocol
                 """
             ))
 
@@ -3631,10 +3656,15 @@ def vad():
     start = subparsers.add_parser('start', help='HIGHLY EXPERIMENTAL: Start an onion vpn service in its own network namespace')
     start.set_defaults(func=start_command)
     start.add_argument('CMD', nargs=argparse.REMAINDER, help=f'Command to start the service in the service namespace with or without arguments.')
+    start.add_argument('-i', '--proxy-ip', help='proxy ip')
+    start.add_argument('-k', '--proxy-key', help='proxy key')
+    start.add_argument('-p', '--proxy-port', help='proxy port', default=6666)
+    start.add_argument('-b', '--namespace-source', help='Specify a circuit end from where the service gets started.', default='service_start')
 
     connect = subparsers.add_parser('connect', help='HIGHLY EXPERIMENTAL: Connect to an onion vpn service')
     connect.set_defaults(func=connect_command)
     connect.add_argument('URL', nargs=1, help=f'URL')
+    connect.add_argument('-b', '--namespace-source', help='Specify a circuit end from where the client will connect.', default='client_start')
 
     install = subparsers.add_parser('install', aliases=['in'], help='Installs a service which automatically starts the VPN on system startup and tears it down on system shutdown. A udev rule move new network devices into physical namespace and automatically creates it if it does not exists. A timer will rotate WireGuard keys every 4 days (same as the Mullvad app).')
     install.set_defaults(func=install_command)

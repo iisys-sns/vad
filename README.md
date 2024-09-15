@@ -47,6 +47,7 @@ The physical devices will stay inaccessible until an `vad down`.
 1. `systemctl`
 1. `udevadm`
 1. `wg`
+1. `python-3.10`
 1. `python-cryptography`
 1. `python-noiseprotocol`
 1. `python-numpy`
@@ -62,14 +63,15 @@ The physical devices will stay inaccessible until an `vad down`.
 Arch Linux based:
 
 ```
-# pacman -Syu --noconfirm python-cryptography python-noiseprotocol python-numpy python-prettytable python-pyasn python-pycountry python-requests python-termcolor python-yaml iw sudo wireguard-tools
+$ pacman -Syu --noconfirm python-cryptography python-noiseprotocol python-numpy python-prettytable python-pyasn python-pycountry python-requests python-termcolor python-yaml iw sudo wireguard-tools
 ```
 
-Debian based:
+Debian based (ubuntu 22.04, 24.04; bookworm):
 
 ```
-# apt install -y -q python3-pip python3-cryptography python3-numpy python3-prettytable python3-pyasn python3-pycountry python3-requests python3-termcolor python3-yaml sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
-# pip install --break-system-packages noiseprotocol
+$ apt install -y -q python3-pip python3-cryptography python3-numpy python3-prettytable python3-pyasn python3-pycountry python3-requests python3-termcolor python3-yaml sudo psmisc wireguard-tools iproute2 iw wpasupplicant dhcpcd5 procps
+$ pip install --break-system-packages noiseprotocol
+$ pip install noiseprotocol # 22.04
 ```
 
 ## Untested
