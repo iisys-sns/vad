@@ -226,16 +226,22 @@ Onion Service (**HIGHLY EXPERIMENTAL!**):
 ```sh
 # Proxy:
 $ vad proxy                             # Must be reachable from the Internet on UDP port 6666.
+                                        # This proxy combines STUN, ICE and a signal channel into one service.
 
 # Service:
-$ vad start python -m http.server 8000  # Starts a webserver in the current directory.
-                                        # The service will be started in the network namespace `service`.
-                                        # Outputs an URL where the service is reachable, e.g. aaah6aaaahcn5vsceb5ntdbls2u3xl2dtqb4uywj2dbgfcjels5guvmovfffyodu.onion.vpn
-                                        # The URL contains the address and port of the proxy, as well as the service port (8000).
+$ vad up -t service_start -b physical dk
+$ vad -v start -i <ip> -p <port> -k <public-key> python -m http.server 8000 --bind ::
+                                        # Copy the start command from the output of `vad proxy.
+                                        # It will start a webserver in the current directory.
+                                        # The service will be started in the network namespace `service` that is linked to `service_start`.
+                                        # It will use the circuit that was created by `vad up`.
+                                        # Outputs an URL where the service is reachable.
 
 # Client:
-$ vad connect <URL>                     # Uses the URL from the service.
-                                        # Afterwards the client can access the service at http://[fc00::1]:8000
+$ vad up -t client_start -b physical se
+$ vad -v connect <URL>                  # Copy the connect command from the output of `vad start`.
+                                        # It will connect to the service and start chromium (http://[fc00::1]:8000) inside of the `client` namespace.
+                                        # It will use the circuit that was created by `vad up`.
 ```
 
 Reset:
