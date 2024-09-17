@@ -1,7 +1,22 @@
 # Vad
 
-An alternative experimental command line interface (CLI) for Mullvad that is based on network namespaces, supports up to ten hops and does not need a daemon.
-NordVPN, ProtonVPN und Surfshark are only rudimentary supported.
+Vad is our experimental command line interface (CLI) for OnionVPN, an onion routing-based VPN tunnel that provides better bulk transfer performance than Tor and offers additional security features over a VPN:
+First, intermediate VPN nodes see only encrypted traffic; second, protection against AS-level attackers with a new path selection algorithm; and third, onion services with a novel cryptographic NAT traversal algorithm using the Noise protocol framework.
+
+See our paper [OnionVPN: Onion Routing-Based VPN-Tunnels with Onion Services](https://florian.adamsky.it/research/publications/2024/onion-vpn.pdf) for a detailed description
+of the approach and results of this tool. Please cite it as following:
+
+```
+@inproceedings{pahl:onionvpn:2024,
+  title     = {{OnionVPN: Onion Routing-Based VPN-Tunnels with Onion Services}},
+  author    = {Pahl, Sebastian; Kaiser, Daniel; Engel, Thomas; Adamsky, Florian},
+  booktitle = {Proceedings of the 23th Workshop on Privacy in the Electronic Society (WPES)},
+  date      = {2024},
+}
+```
+
+The script is an alternative CLI for Mullvad that is based on network namespaces, supports up to ten hops and does not need a daemon.
+NordVPN, ProtonVPN and Surfshark are only rudimentary supported.
 It aims to be very user friendly.
 It is based on [this](https://www.wireguard.com/netns#sample-script) script.
 It also supports features that make Onion Services possible, even without port-forwarding, but these are **HIGHLY EXPERIMENTAL!**
