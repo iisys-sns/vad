@@ -1,7 +1,8 @@
 # Vad
 
 Vad is our experimental command line interface (CLI) for OnionVPN, an onion routing-based VPN tunnel that provides better bulk transfer performance than Tor and offers additional security features over a VPN:
-First, intermediate VPN nodes see only encrypted traffic; second, protection against AS-level attackers with a new path selection algorithm; and third, onion services with a novel cryptographic NAT traversal algorithm using the Noise protocol framework.
+First, intermediate VPN nodes see only encrypted traffic; second, protection against AS-level attackers with a new path selection algorithm
+(not integrated into vad); and third, onion services with a novel cryptographic NAT traversal algorithm using the Noise protocol framework.
 
 See our paper [OnionVPN: Onion Routing-Based VPN-Tunnels with Onion Services](https://florian.adamsky.it/research/publications/2024/onion-vpn.pdf) for a detailed description
 of the approach and results of this tool. Please cite it as following:
